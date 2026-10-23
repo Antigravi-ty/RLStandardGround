@@ -1,0 +1,16 @@
+{
+  "name": "rl-standard-ground",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Parametric Soccar Ground Texture & SVG Studio (1:1 Unreal Units, Q1 Quadrant + 4x Mirrored Full Arena Preview)",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "vite": "^6.2.0"
+  },
+  "packageManager": "pnpm@10.6.5"
+}
