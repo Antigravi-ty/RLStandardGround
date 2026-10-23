@@ -1,6 +1,12 @@
 import { DEFAULT_PROJECT, createNewLayerTemplate } from './defaultProject.js';
-import { Q1_NAMED_ANCHORS } from './physicsData.js';
-import { solveThreePointArc } from './geometryMath.js';
+import { Q1_NAMED_ANCHORS, ALL_HITBOX_UNION_BOUNDS } from './physicsData.js';
+import {
+  solveThreePointArc,
+  solveMonotoneFivePointSpline,
+  trimLineSegment,
+  findNearestAnchor,
+  distanceToLayerQ1
+} from './geometryMath.js';
 import { buildArenaSvgString, getScopeDimensions } from './svgRenderer.js';
 import {
   EXPORT_PRESETS,
@@ -10,16 +16,19 @@ import {
   exportRasterTexture
 } from './exporter.js';
 
-const STORAGE_KEY = 'rl_standard_ground_project_v2';
+const STORAGE_KEY = 'rl_standard_ground_project_v3';
 
 class GroundStudioApp {
   constructor() {
     this.project = this.loadSavedProject();
-    this.selectedLayerId = this.project.layers[0]?.id || null;
+    this.selectedLayerId = this.project.layers[3]?.id || this.project.layers[0]?.id || null;
+    this.hoveredLayerId = null;
+    this.snappedAnchor = null;
+    this.magneticSnapEnabled = true;
     this.viewMode = 'split'; // 'split' (Q1 + Full) | 'full_only' | 'q1_only'
     this.zoomScale = 1.0;
-    this.pickTarget = null; // null | 'p1' | 'p2' | 'p3' | 'center'
-    this.selectedExportPresetId = EXPORT_PRESETS[0].id; // Proportional Q1 2048px
+    this.pickTarget = null; // null | 'p1' | 'p2' | 'p3' | 'center' | 'seg_p1' | 'seg_p2'
+    this.selectedExportPresetId = EXPORT_PRESETS[0].id;
     this.exportFormat = 'image/webp';
     this.exportWithRef = false;
 
@@ -61,6 +70,26 @@ class GroundStudioApp {
     return this.project.layers.find(l => l.id === this.selectedLayerId) || null;
   }
 
+  copySingleLayerJson(layer, btnEl = null) {
+    if (!layer) return;
+    const jsonStr = JSON.stringify(layer, null, 2);
+    navigator.clipboard.writeText(jsonStr).then(() => {
+      if (btnEl) {
+        const orig = btnEl.innerHTML;
+        btnEl.innerHTML = '✅ 已复制本层!';
+        setTimeout(() => { btnEl.innerHTML = orig; }, 1400);
+      }
+    }).catch(() => {
+      const ta = document.getElementById('txtSingleLayerJson');
+      if (ta) {
+        ta.style.display = 'block';
+        ta.value = jsonStr;
+        ta.select();
+        document.execCommand('copy');
+      }
+    });
+  }
+
   renderShell() {
     const safeExp = this.project.smallPadSafeExpand ?? 60;
     this.root.innerHTML = `
@@ -85,8 +114,8 @@ class GroundStudioApp {
         <div class="toolbar-group">
           <button class="btn" id="btnUploadFile" title="导入 JSON 参数文件或参考 SVG">📂 导入 JSON / SVG</button>
           <input type="file" id="fileInputHidden" accept=".json,.svg" style="display:none" />
-          <button class="btn" id="btnExportJson" title="保存当前所有图层参数为 JSON">💾 导出参数 JSON</button>
-          <button class="btn btn-danger" id="btnResetDefault" title="恢复极简默认三图层预设">↺ 重置极简预设</button>
+          <button class="btn" id="btnExportJson" title="保存当前所有图层参数为 JSON">💾 导出整套 JSON</button>
+          <button class="btn btn-danger" id="btnResetDefault" title="恢复默认预设">↺ 重置默认</button>
         </div>
       </header>
 
@@ -100,16 +129,17 @@ class GroundStudioApp {
               <span>1. ✏️ 实际绘制的贴图图层 (导出内容)</span>
             </div>
             <div class="hint-box">
-              这里才是<b>真正画在贴图上的白色线条</b>。点击下方任一图层即可在右侧调整线宽、内缩距离或 Safe Area 截断。
+              这里才是<b>真正画在贴图上的白色线条</b>。直接在画布上点击线条也可自动选中对应图层；每层右侧 📋 可单独复制该层 JSON。
             </div>
             <div class="field-inline">
               <select id="selNewLayerType" style="flex:1">
-                <option value="circle_arc">+ 定点圆 / 极角圆弧 (如连线圆)</option>
+                <option value="rect_or_line">+ 锚点吸附直线/虚线 (含首尾跳过)</option>
+                <option value="monotone_pad_spline">+ 五点斜率单调橄榄球曲线</option>
+                <option value="spawn_marker_group">+ 车辆生成点全碰撞箱四角框</option>
+                <option value="circle_arc">+ 定点圆 / 极角圆弧 (含首尾跳过)</option>
                 <option value="three_point_arc">+ 三点确定圆弧 (3-Point Arc)</option>
-                <option value="rect_or_line">+ 直线段 / 矩形框 (Box/Line)</option>
                 <option value="contour_offset">+ 沿地面边界内缩线 (Inset Path)</option>
                 <option value="boost_pad_group">+ Boost Pad 判定内收环 (Pad Rings)</option>
-                <option value="spawn_marker_group">+ 出生点/复活点地面框 (Spawn Box)</option>
                 <option value="turf_stripes">+ 草坪深浅条纹 (Turf Stripes)</option>
               </select>
               <button class="btn btn-primary" id="btnAddLayer">添加</button>
@@ -121,9 +151,6 @@ class GroundStudioApp {
           <div class="panel-section">
             <div class="panel-title">
               <span>2. 🛡️ Small Boost Pad Safe Area (截断保护区)</span>
-            </div>
-            <div class="hint-box">
-              小氮气垫物理判定半径为 <b>144 UU</b>。设置外扩距离后，开启了「Safe Area 截断」的连线/圆环在进入 <b>R = 144 + 外扩</b> 范围时会自动截断留白。
             </div>
             <div class="field-row">
               <div class="field-label">
@@ -137,7 +164,7 @@ class GroundStudioApp {
             </div>
             <label class="checkbox-row">
               <input type="checkbox" id="chkRefSafeArea" />
-              <span>🩷 在画布上显示 Safe Area 虚线边界 (仅辅助参考)</span>
+              <span>🩷 在画布上显示 Safe Area 虚线边界</span>
             </label>
           </div>
 
@@ -146,11 +173,12 @@ class GroundStudioApp {
             <div class="panel-title">
               <span>3. 📐 物理判定参考层 (仅对位，不导出)</span>
             </div>
+            <label class="checkbox-row"><input type="checkbox" id="chkRefPadNumbers" /> <span>🔢 显示 Boost Pad 与车位编号 (#B1~#S9, #KO1~#DM2, #IX1)</span></label>
             <label class="checkbox-row"><input type="checkbox" id="chkRefFlatFloor" /> <span>🟢 Z=0 纯平地面边界 (绿色虚线)</span></label>
             <label class="checkbox-row"><input type="checkbox" id="chkRefBoostPads" /> <span>🟡 Boost Pad 拾取判定圆 (R=208 / 144)</span></label>
+            <label class="checkbox-row"><input type="checkbox" id="chkRefSpawns" /> <span>🔴 显示全部7种车型碰撞箱叠加参考框</span></label>
             <label class="checkbox-row"><input type="checkbox" id="chkRefGoalBox" /> <span>🟠 球门框与进球判定线 (Y=5120~6000)</span></label>
             <label class="checkbox-row"><input type="checkbox" id="chkRefOuterWall" /> <span>🔵 4096 垂直外墙轮廓 (浅蓝实线)</span></label>
-            <label class="checkbox-row"><input type="checkbox" id="chkRefSpawns" /> <span>🔴 开球点 &amp; 复活点车体碰撞箱</span></label>
             <label class="checkbox-row"><input type="checkbox" id="chkRefGrid" /> <span>📏 512 / 1024 UU 坐标网格</span></label>
             <div id="customSvgRefRow" style="display:none;border-top:1px dashed #334155;padding-top:6px">
               <label class="checkbox-row"><input type="checkbox" id="chkRefCustomSvg" /> <span>🖼️ 显示导入的外部参考 SVG</span></label>
@@ -202,11 +230,16 @@ class GroundStudioApp {
         <!-- Center Viewport -->
         <main class="viewport-container">
           <div class="viewport-header">
-            <div style="display:flex;align-items:center;gap:12px">
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
               <span id="lblScopeInfo">画布: 4096 × 6000 UU</span>
               <span class="coord-readout" id="lblCursorCoord">X: 0 UU, Y: 0 UU</span>
+              <span id="lblHoverLayer" style="font-size:11px;color:#38bdf8;font-family:monospace"></span>
             </div>
             <div style="display:flex;align-items:center;gap:8px">
+              <label class="checkbox-row" style="font-size:11px;color:#6ee7b7" title="在画布拾取坐标时自动吸附到最近的 Boost Pad / 车位锚点">
+                <input type="checkbox" id="chkMagneticSnap" checked />
+                <span>🧲 锚点磁吸</span>
+              </label>
               <span>缩放:</span>
               <button class="btn" id="btnZoomOut" style="padding:2px 8px">-</button>
               <span id="lblZoom" style="font-family:monospace;min-width:44px;text-align:center">100%</span>
@@ -218,7 +251,7 @@ class GroundStudioApp {
           <div class="viewport-split" id="viewportSplit">
             <!-- Left Pane: Q1 Editor -->
             <div class="canvas-pane" id="paneQ1">
-              <div class="pane-badge">✏️ 四分之一场地编辑区 (Q1: X ∈ [0, 4096], Y ∈ [0, 6000]) — 点击画布可拾取坐标</div>
+              <div class="pane-badge">✏️ 四分之一编辑区 (Q1) — 悬停高亮线条，点击直接选中线条或磁吸拾取锚点</div>
               <div class="svg-stage" id="stageQ1"></div>
             </div>
             <!-- Right Pane: Full 4x Mirrored Arena Preview -->
@@ -233,11 +266,23 @@ class GroundStudioApp {
         <aside class="sidebar-right">
           <!-- Selected Layer Inspector -->
           <div class="panel-section" id="inspectorPanel">
-            <div class="panel-title">
+            <div class="panel-title" style="flex-wrap:wrap;gap:6px">
               <span>🛠️ 当前选中图层参数</span>
-              <div style="display:flex;gap:4px">
+              <div style="display:flex;gap:4px;flex-wrap:wrap">
+                <button class="btn btn-primary" id="btnCopyLayerJson" style="padding:2px 8px;font-size:11px" title="仅复制当前选中图层的 JSON 参数，方便直接发给助手沟通">📋 复制本层参数</button>
+                <button class="btn" id="btnToggleLayerJsonBox" style="padding:2px 7px;font-size:11px" title="查看或粘贴单层 JSON">{ } 粘贴/编辑JSON</button>
                 <button class="btn" id="btnDuplicateLayer" style="padding:2px 7px;font-size:11px">复制图层</button>
                 <button class="btn btn-danger" id="btnDeleteLayer" style="padding:2px 7px;font-size:11px">删除</button>
+              </div>
+            </div>
+            <div id="singleLayerJsonBox" style="display:none;background:#090d16;border:1px solid #334155;border-radius:6px;padding:8px">
+              <div class="field-label" style="margin-bottom:4px">
+                <span>单图层 JSON (可直接修改或粘贴后点击「应用到本层」)</span>
+              </div>
+              <textarea id="txtSingleLayerJson" rows="7" style="width:100%;background:#0f172a;color:#93c5fd;border:1px solid #334155;border-radius:4px;font-family:monospace;font-size:11px;padding:6px"></textarea>
+              <div style="display:flex;gap:6px;margin-top:6px">
+                <button class="btn btn-emerald" id="btnApplySingleLayerJson" style="flex:1;justify-content:center;padding:4px">✅ 应用 JSON 到当前图层</button>
+                <button class="btn" id="btnAddFromLayerJson" style="flex:1;justify-content:center;padding:4px">➕ 作为新图层插入</button>
               </div>
             </div>
             <div id="inspectorBody"></div>
@@ -249,7 +294,7 @@ class GroundStudioApp {
               <span>🚀 导出 WebP / PNG / SVG 贴图</span>
             </div>
             <div class="field-row">
-              <div class="field-label"><span>常用导出规格预设 (推荐按真实比例无拉伸)</span></div>
+              <div class="field-label"><span>常用导出规格预设</span></div>
               <select id="selExportPreset">
                 ${EXPORT_PRESETS.map(p => `<option value="${p.id}" ${p.id === this.selectedExportPresetId ? 'selected' : ''}>${p.label}</option>`).join('')}
               </select>
@@ -309,6 +354,53 @@ class GroundStudioApp {
     document.getElementById('btnViewSplit').onclick = () => setView('split');
     document.getElementById('btnViewFull').onclick = () => setView('full_only');
     document.getElementById('btnViewQ1').onclick = () => setView('q1_only');
+
+    document.getElementById('chkMagneticSnap').onchange = (e) => {
+      this.magneticSnapEnabled = e.target.checked;
+    };
+
+    // Single Layer JSON Copy & Paste
+    const btnCopyLayer = document.getElementById('btnCopyLayerJson');
+    btnCopyLayer.onclick = () => {
+      this.copySingleLayerJson(this.getSelectedLayer(), btnCopyLayer);
+    };
+
+    const jsonBox = document.getElementById('singleLayerJsonBox');
+    const txtJson = document.getElementById('txtSingleLayerJson');
+    document.getElementById('btnToggleLayerJsonBox').onclick = () => {
+      const isHidden = jsonBox.style.display === 'none';
+      jsonBox.style.display = isHidden ? 'block' : 'none';
+      if (isHidden && this.getSelectedLayer()) {
+        txtJson.value = JSON.stringify(this.getSelectedLayer(), null, 2);
+      }
+    };
+
+    document.getElementById('btnApplySingleLayerJson').onclick = () => {
+      try {
+        const parsed = JSON.parse(txtJson.value);
+        const idx = this.project.layers.findIndex(l => l.id === this.selectedLayerId);
+        if (idx >= 0 && parsed && parsed.type) {
+          this.project.layers[idx] = { ...this.project.layers[idx], ...parsed, id: this.selectedLayerId };
+          this.syncAll();
+        }
+      } catch (err) {
+        alert(`单层 JSON 格式有误: ${err.message}`);
+      }
+    };
+
+    document.getElementById('btnAddFromLayerJson').onclick = () => {
+      try {
+        const parsed = JSON.parse(txtJson.value);
+        if (parsed && parsed.type) {
+          parsed.id = `layer_${parsed.type}_${Date.now()}`;
+          this.project.layers.push(parsed);
+          this.selectedLayerId = parsed.id;
+          this.syncAll();
+        }
+      } catch (err) {
+        alert(`单层 JSON 格式有误: ${err.message}`);
+      }
+    };
 
     // Global Small Pad Safe Area Expand controls
     const rngSafe = document.getElementById('rngSafeExpand');
@@ -376,6 +468,7 @@ class GroundStudioApp {
         this.saveAndRenderCanvas();
       };
     };
+    bindRefCheck('chkRefPadNumbers', 'showPadNumbers');
     bindRefCheck('chkRefSafeArea', 'showSmallPadSafeArea');
     bindRefCheck('chkRefFlatFloor', 'showFlatFloorZ0');
     bindRefCheck('chkRefOuterWall', 'showOuterWall');
@@ -517,9 +610,10 @@ class GroundStudioApp {
         contour_offset: '边界线',
         circle_arc: '圆/弧',
         three_point_arc: '三点弧',
+        monotone_pad_spline: '单调弧',
         rect_or_line: '框/线',
         boost_pad_group: '垫子环',
-        spawn_marker_group: '出生点',
+        spawn_marker_group: '生成点',
         turf_stripes: '条纹'
       };
 
@@ -530,10 +624,24 @@ class GroundStudioApp {
           <span class="layer-name">${layer.name}</span>
         </div>
         <div class="layer-actions">
+          <button class="icon-btn btn-copy-item" title="复制本层 JSON 参数">📋</button>
           <button class="icon-btn btn-up" title="上移">▲</button>
           <button class="icon-btn btn-down" title="下移">▼</button>
         </div>
       `;
+
+      div.onmouseenter = () => {
+        if (this.hoveredLayerId !== layer.id) {
+          this.hoveredLayerId = layer.id;
+          this.saveAndRenderCanvas();
+        }
+      };
+      div.onmouseleave = () => {
+        if (this.hoveredLayerId === layer.id) {
+          this.hoveredLayerId = null;
+          this.saveAndRenderCanvas();
+        }
+      };
 
       div.onclick = (e) => {
         if (e.target.classList.contains('layer-vis-chk') || e.target.classList.contains('icon-btn')) return;
@@ -548,6 +656,12 @@ class GroundStudioApp {
       chk.onchange = (e) => {
         layer.visible = e.target.checked;
         this.saveAndRenderCanvas();
+      };
+
+      const btnCopyItem = div.querySelector('.btn-copy-item');
+      btnCopyItem.onclick = (e) => {
+        e.stopPropagation();
+        this.copySingleLayerJson(layer, btnCopyItem);
       };
 
       div.querySelector('.btn-up').onclick = () => {
@@ -582,6 +696,11 @@ class GroundStudioApp {
       return;
     }
 
+    const txtJson = document.getElementById('txtSingleLayerJson');
+    if (txtJson && document.getElementById('singleLayerJsonBox')?.style.display !== 'none') {
+      txtJson.value = JSON.stringify(layer, null, 2);
+    }
+
     let html = `
       <div class="field-row">
         <div class="field-label"><span>图层名称</span></div>
@@ -589,13 +708,36 @@ class GroundStudioApp {
       </div>
     `;
 
-    // Safe Area Truncation Toggle (applicable to all line/arc/contour/rect layers)
+    // Safe Area Truncation Toggle (applicable to all line/arc/contour/spline/rect layers)
     if (layer.type !== 'boost_pad_group' && layer.type !== 'turf_stripes') {
       html += `
         <label class="checkbox-row" style="background:rgba(236,72,153,0.12);border:1px solid rgba(244,114,182,0.4);padding:6px 8px;border-radius:6px">
           <input type="checkbox" id="chkCutBySafeArea" ${layer.cutBySmallPadSafeArea ? 'checked' : ''} />
           <span>✂️ 被 Small Boost Pad Safe Area 截断 (进入保护区不画线)</span>
         </label>
+      `;
+    }
+
+    // Start / End Distance Trimming (跳过起始距离 / 跳过终止距离) for lines and curves
+    if (['rect_or_line', 'circle_arc', 'three_point_arc', 'monotone_pad_spline', 'contour_offset'].includes(layer.type)) {
+      const tStart = layer.trimStart ?? 0;
+      const tEnd = layer.trimEnd ?? 0;
+      html += `
+        <div style="background:rgba(59,130,246,0.1);border:1px solid rgba(59,130,246,0.35);padding:8px;border-radius:6px;display:flex;flex-direction:column;gap:6px">
+          <div class="field-label" style="color:#93c5fd;font-weight:600">
+            <span>⏭️ 沿线首尾跳过距离 (Start / End Skip UU)</span>
+          </div>
+          <div class="field-grid-2">
+            <div class="field-row">
+              <div class="field-label"><span>起始跳过 (Trim Start UU)</span></div>
+              <input type="number" id="numTrimStart" value="${tStart}" min="0" max="5000" step="10" />
+            </div>
+            <div class="field-row">
+              <div class="field-label"><span>终止跳过 (Trim End UU)</span></div>
+              <input type="number" id="numTrimEnd" value="${tEnd}" min="0" max="5000" step="10" />
+            </div>
+          </div>
+        </div>
       `;
     }
 
@@ -625,6 +767,43 @@ class GroundStudioApp {
           </div>
         </div>
       `;
+    } else if (layer.type === 'monotone_pad_spline') {
+      const solved = solveMonotoneFivePointSpline(layer);
+      const midExp = layer.midXExpand ?? 112;
+      html += `
+        <div class="hint-box">
+          🏈 <b>五点斜率单调橄榄球曲线原理</b>：<br/>
+          1. 四垫交点 <b>#IX1 (2048, 0)</b> 由 <b>#S1(1024,0)—#B1(3584,0)</b> 与右侧上下对称的 <b>#S3(2048,±1036)</b> 交叉得出。<br/>
+          2. 起点 <b>P1(${2048 + midExp}, 0)</b> 从 #IX1 向外微移 <b>+${midExp} UU</b>，在穿过中场线 <code>Y=0</code> 处强制切线斜率 <b>dX/dY = 0 (竖直平滑过中线)</b>，再单调光滑穿过 <b>#S3 → #S4 → #S7 → #S9</b>。<br/>
+          3. 当外扩在 <code>1 ~ 213 UU</code> 之间时，整条曲线斜率严格单调无拐点！
+        </div>
+        <div class="field-row">
+          <div class="field-label">
+            <span>P1 中场交点 (#IX1=2048) 向外偏移 (UU)</span>
+            <span class="field-val" id="lblMidExpand">+${midExp} UU (X=${2048 + midExp})</span>
+          </div>
+          <div class="field-inline">
+            <input type="range" id="rngMidExpand" min="2" max="450" step="2" value="${midExp}" />
+            <input type="number" id="numMidExpand" value="${midExp}" style="width:78px" />
+          </div>
+        </div>
+        <div class="field-grid-2">
+          <div class="field-row">
+            <div class="field-label"><span>切线饱满张力 (Tension)</span></div>
+            <input type="number" id="numSplineTension" value="${layer.tension ?? 0.55}" min="0.15" max="0.95" step="0.05" />
+          </div>
+          <div class="field-row">
+            <div class="field-label"><span>门前 #S9(X=0) 末端形态</span></div>
+            <select id="selEndSlopeMode">
+              <option value="natural_pointed" ${layer.endSlopeMode !== 'flat_x0' ? 'selected' : ''}>橄榄球自然尖端 (单调斜率)</option>
+              <option value="flat_x0" ${layer.endSlopeMode === 'flat_x0' ? 'selected' : ''}>X=0 处水平切线收口</option>
+            </select>
+          </div>
+        </div>
+        <div style="font-size:11px;color:#94a3b8;font-family:monospace;background:#090d16;padding:6px;border-radius:5px">
+          各段割线斜率 -dX/dY: ${solved.secantSlopes.map(d => d.toFixed(3)).join(' → ')}
+        </div>
+      `;
     } else if (layer.type === 'circle_arc') {
       html += `
         <div class="field-row">
@@ -645,7 +824,7 @@ class GroundStudioApp {
           </div>
         </div>
         <button class="btn ${this.pickTarget === 'center' ? 'active' : ''}" id="btnPickCenter" style="width:100%;justify-content:center">
-          🎯 点击 Q1 画布直接拾取圆心 (cx, cy)
+          🎯 点击 Q1 画布磁吸拾取圆心 (cx, cy)
         </button>
         <div class="field-row">
           <div class="field-label">
@@ -660,11 +839,11 @@ class GroundStudioApp {
         <div class="field-grid-2">
           <div class="field-row">
             <div class="field-label"><span>起始角 (°) [0=+X, 90=+Y]</span></div>
-            <input type="number" id="numStartDeg" value="${layer.startDeg}" min="-360" max="360" step="5" />
+            <input type="number" id="numStartDeg" value="${layer.startDeg}" min="-360" max="360" step="0.5" />
           </div>
           <div class="field-row">
             <div class="field-label"><span>终止角 (°)</span></div>
-            <input type="number" id="numEndDeg" value="${layer.endDeg}" min="-360" max="360" step="5" />
+            <input type="number" id="numEndDeg" value="${layer.endDeg}" min="-360" max="360" step="0.5" />
           </div>
         </div>
       `;
@@ -684,19 +863,19 @@ class GroundStudioApp {
           <div class="field-row"><div class="field-label"><span>起点 P1.X</span></div><input type="number" id="numP1X" value="${layer.x1}" step="10" /></div>
           <div class="field-row"><div class="field-label"><span>起点 P1.Y</span></div><input type="number" id="numP1Y" value="${layer.y1}" step="10" /></div>
         </div>
-        <button class="btn ${this.pickTarget === 'p1' ? 'active' : ''}" id="btnPickP1" style="justify-content:center">🟢 在画布上点选起点 P1</button>
+        <button class="btn ${this.pickTarget === 'p1' ? 'active' : ''}" id="btnPickP1" style="justify-content:center">🟢 在画布上磁吸点选起点 P1</button>
 
         <div class="field-grid-2">
           <div class="field-row"><div class="field-label"><span>经过点 P2.X</span></div><input type="number" id="numP2X" value="${layer.x2}" step="10" /></div>
           <div class="field-row"><div class="field-label"><span>经过点 P2.Y</span></div><input type="number" id="numP2Y" value="${layer.y2}" step="10" /></div>
         </div>
-        <button class="btn ${this.pickTarget === 'p2' ? 'active' : ''}" id="btnPickP2" style="justify-content:center">🟡 在画布上点选中间点 P2</button>
+        <button class="btn ${this.pickTarget === 'p2' ? 'active' : ''}" id="btnPickP2" style="justify-content:center">🟡 在画布上磁吸点选中间点 P2</button>
 
         <div class="field-grid-2">
           <div class="field-row"><div class="field-label"><span>终点 P3.X</span></div><input type="number" id="numP3X" value="${layer.x3}" step="10" /></div>
           <div class="field-row"><div class="field-label"><span>终点 P3.Y</span></div><input type="number" id="numP3Y" value="${layer.y3}" step="10" /></div>
         </div>
-        <button class="btn ${this.pickTarget === 'p3' ? 'active' : ''}" id="btnPickP3" style="justify-content:center">🟣 在画布上点选终点 P3</button>
+        <button class="btn ${this.pickTarget === 'p3' ? 'active' : ''}" id="btnPickP3" style="justify-content:center">🟣 在画布上磁吸点选终点 P3</button>
 
         <label class="checkbox-row">
           <input type="checkbox" id="chk3PtFullCircle" ${layer.fullCircle ? 'checked' : ''} />
@@ -704,33 +883,63 @@ class GroundStudioApp {
         </label>
       `;
     } else if (layer.type === 'rect_or_line') {
+      const totalDist = Math.hypot((Number(layer.x2) || 0) - (Number(layer.x1) || 0), (Number(layer.y2) || 0) - (Number(layer.y1) || 0));
+      const trimmed = trimLineSegment(
+        Number(layer.x1) || 0, Number(layer.y1) || 0,
+        Number(layer.x2) || 0, Number(layer.y2) || 0,
+        layer.trimStart, layer.trimEnd
+      );
       html += `
         <div class="field-row">
           <div class="field-label"><span>几何子类型</span></div>
           <select id="inspRectSubMode">
+            <option value="custom_segment" ${layer.subMode === 'custom_segment' ? 'selected' : ''}>任意两点连线 (如车位 → Boost Pad 引导线)</option>
             <option value="hline_y0" ${layer.subMode === 'hline_y0' ? 'selected' : ''}>水平直线 (如 Y=0 中场线)</option>
             <option value="vline_x0" ${layer.subMode === 'vline_x0' ? 'selected' : ''}>垂直直线 (如 X=0 中轴线)</option>
-            <option value="custom_segment" ${layer.subMode === 'custom_segment' ? 'selected' : ''}>任意两点直线段 (X1,Y1 → X2,Y2)</option>
             <option value="rect_box" ${layer.subMode === 'rect_box' ? 'selected' : ''}>矩形框 / 禁区框 (Rect Box)</option>
           </select>
         </div>
-        <div class="field-grid-2">
-          <div class="field-row"><div class="field-label"><span>X1 (左/起点 UU)</span></div><input type="number" id="numRectX1" value="${layer.x1}" step="16" /></div>
-          <div class="field-row"><div class="field-label"><span>Y1 (上/起点 UU)</span></div><input type="number" id="numRectY1" value="${layer.y1}" step="16" /></div>
-          <div class="field-row"><div class="field-label"><span>X2 (右/终点 UU)</span></div><input type="number" id="numRectX2" value="${layer.x2}" step="16" /></div>
-          <div class="field-row"><div class="field-label"><span>Y2 (下/终点 UU)</span></div><input type="number" id="numRectY2" value="${layer.y2}" step="16" /></div>
+
+        <div class="hint-box">
+          📏 <b>两点总间距</b>: <b>${totalDist.toFixed(1)} UU</b> | 扣除首尾跳过后<b>实际绘制长度</b>: <b>${trimmed.drawnLen.toFixed(1)} UU</b>
         </div>
+
         <div class="field-row">
-          <div class="field-label"><span>圆角半径 (Corner Radius UU)</span></div>
-          <input type="number" id="numCornerRad" value="${layer.cornerRadius || 0}" min="0" max="1000" step="8" />
+          <div class="field-label"><span>起点 P1 快速吸附锚点 (#KO车位 / #S/#B垫子)</span></div>
+          <select id="inspLineAnchor1">
+            <option value="custom">-- 自定义坐标 (或点击下方按钮在画布磁吸点选) --</option>
+            ${Q1_NAMED_ANCHORS.map(a => `<option value="${a.id}" ${(Math.abs(layer.x1 - a.x) < 1 && Math.abs(layer.y1 - a.y) < 1) ? 'selected' : ''}>${a.label}</option>`).join('')}
+          </select>
         </div>
+        <div class="field-grid-2">
+          <div class="field-row"><div class="field-label"><span>起点 X1 (UU)</span></div><input type="number" id="numRectX1" value="${layer.x1}" step="8" /></div>
+          <div class="field-row"><div class="field-label"><span>起点 Y1 (UU)</span></div><input type="number" id="numRectY1" value="${layer.y1}" step="8" /></div>
+        </div>
+        <button class="btn ${this.pickTarget === 'seg_p1' ? 'active' : ''}" id="btnPickSegP1" style="justify-content:center">
+          🟢 在画布上磁吸点选起点 P1 (自动就近吸附锚点)
+        </button>
+
+        <div class="field-row" style="margin-top:4px">
+          <div class="field-label"><span>终点 P2 快速吸附锚点 (#KO车位 / #S/#B垫子)</span></div>
+          <select id="inspLineAnchor2">
+            <option value="custom">-- 自定义坐标 (或点击下方按钮在画布磁吸点选) --</option>
+            ${Q1_NAMED_ANCHORS.map(a => `<option value="${a.id}" ${(Math.abs(layer.x2 - a.x) < 1 && Math.abs(layer.y2 - a.y) < 1) ? 'selected' : ''}>${a.label}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field-grid-2">
+          <div class="field-row"><div class="field-label"><span>终点 X2 (UU)</span></div><input type="number" id="numRectX2" value="${layer.x2}" step="8" /></div>
+          <div class="field-row"><div class="field-label"><span>终点 Y2 (UU)</span></div><input type="number" id="numRectY2" value="${layer.y2}" step="8" /></div>
+        </div>
+        <button class="btn ${this.pickTarget === 'seg_p2' ? 'active' : ''}" id="btnPickSegP2" style="justify-content:center">
+          🔴 在画布上磁吸点选终点 P2 (自动就近吸附锚点)
+        </button>
       `;
     } else if (layer.type === 'boost_pad_group') {
-      const inW = layer.inwardWidth ?? layer.strokeWidth ?? 20;
+      const inW = layer.inwardWidth ?? layer.strokeWidth ?? 10;
       const inOff = layer.insetFromPickup ?? 0;
       html += `
         <div class="hint-box">
-          💡 <b>向内收环模式</b>：大垫子判定圆 <b>R=208</b> (当前绘制 <b>${208 - inOff - inW}~${208 - inOff} UU</b>)，小垫子判定圆 <b>R=144</b> (当前绘制 <b>${144 - inOff - inW}~${144 - inOff} UU</b>)。
+          💡 <b>向内收环模式</b>：大垫子判定圆 <b>R=208</b> (绘制 <b>${208 - inOff - inW}~${208 - inOff} UU</b>)，小垫子判定圆 <b>R=144</b> (绘制 <b>${144 - inOff - inW}~${144 - inOff} UU</b>)。
         </div>
         <div class="field-row">
           <div class="field-label"><span>作用目标垫子 (Target Pads)</span></div>
@@ -758,28 +967,46 @@ class GroundStudioApp {
         </div>
       `;
     } else if (layer.type === 'spawn_marker_group') {
+      const cLen = layer.cornerLength ?? 28;
       html += `
+        <div class="hint-box">
+          🚗 <b>全车型碰撞箱最小外接矩形 (Union AABB)</b>：<br/>
+          综合全部 7 种碰撞箱（Plank 最宽 <code>87.17 UU</code> &amp; 车尾最靠后 <code>-56.65 UU</code>；Breakout 车头最靠前 <code>+79.50 UU</code>），最小外接矩形尺寸为 <b>136.15 × 87.17 UU</b>，仅在四个角留出折角标线！
+        </div>
         <div class="field-row">
-          <div class="field-label"><span>目标位置</span></div>
+          <div class="field-label"><span>目标生成点位置</span></div>
           <select id="inspTargetSpawns">
-            <option value="both" ${layer.targetSpawns === 'both' ? 'selected' : ''}>开球出生点 + Demo 复活点</option>
-            <option value="kickoff" ${layer.targetSpawns === 'kickoff' ? 'selected' : ''}>仅开球出生点 (Kickoff Spawns)</option>
-            <option value="demo" ${layer.targetSpawns === 'demo' ? 'selected' : ''}>仅被炸复活点 (Demo Respawn Slots)</option>
+            <option value="both" ${layer.targetSpawns === 'both' ? 'selected' : ''}>全部生成点 (开球点 #KO1~3 + 复活点 #DM1~2)</option>
+            <option value="kickoff" ${layer.targetSpawns === 'kickoff' ? 'selected' : ''}>仅开球出生点 (#KO1 ~ #KO3)</option>
+            <option value="demo" ${layer.targetSpawns === 'demo' ? 'selected' : ''}>仅被炸复活点 (#DM1 ~ #DM2)</option>
           </select>
         </div>
-        <div class="field-grid-2">
-          <div class="field-row">
-            <div class="field-label"><span>标记形状</span></div>
-            <select id="inspSpawnShape">
-              <option value="hitbox_outline" ${layer.shape === 'hitbox_outline' ? 'selected' : ''}>车体碰撞箱矩形</option>
-              <option value="circle" ${layer.shape === 'circle' ? 'selected' : ''}>圆形标记</option>
-              <option value="crosshair" ${layer.shape === 'crosshair' ? 'selected' : ''}>十字准星</option>
-            </select>
+        <div class="field-row">
+          <div class="field-label"><span>标记样式</span></div>
+          <select id="inspSpawnShape">
+            <option value="union_corners" ${layer.shape === 'union_corners' ? 'selected' : ''}>全车型最小包围矩形 — 四角 L 形折角框 (推荐)</option>
+            <option value="union_rect" ${layer.shape === 'union_rect' ? 'selected' : ''}>全车型最小包围矩形 — 完整闭合框</option>
+            <option value="hitbox_outline" ${layer.shape === 'hitbox_outline' ? 'selected' : ''}>单一车型碰撞箱矩形 (Octane)</option>
+            <option value="crosshair" ${layer.shape === 'crosshair' ? 'selected' : ''}>中心十字准星</option>
+          </select>
+        </div>
+        <div class="field-row">
+          <div class="field-label">
+            <span>四角折线臂长 (Corner Arm Length UU)</span>
+            <span class="field-val" id="lblCornerLen">${cLen} UU</span>
           </div>
-          <div class="field-row">
-            <div class="field-label"><span>外扩边距 (Margin UU)</span></div>
-            <input type="number" id="numSpawnMargin" value="${layer.expandMargin ?? 16}" step="4" />
+          <div class="field-inline">
+            <input type="range" id="rngCornerLen" min="6" max="65" step="2" value="${cLen}" />
+            <input type="number" id="numCornerLen" value="${cLen}" style="width:74px" />
           </div>
+        </div>
+        <label class="checkbox-row">
+          <input type="checkbox" id="chkSpawnHugOuter" ${layer.hugOuterEdge !== false ? 'checked' : ''} />
+          <span>折角内沿紧贴最小包围矩形外缘 (不侵入车体)</span>
+        </label>
+        <div class="field-row">
+          <div class="field-label"><span>额外外扩间距 (Expand Margin UU)</span></div>
+          <input type="number" id="numSpawnMargin" value="${layer.expandMargin ?? 0}" step="2" />
         </div>
       `;
     } else if (layer.type === 'turf_stripes') {
@@ -812,11 +1039,11 @@ class GroundStudioApp {
           ${showStrokeSlider ? `
           <div class="field-row">
             <div class="field-label">
-              <span>线条宽度 (Stroke Width UU)</span>
+              <span>线条粗细 (Stroke Width UU)</span>
               <span class="field-val" id="lblStrokeW">${layer.strokeWidth ?? 20} UU</span>
             </div>
             <div class="field-inline">
-              <input type="range" id="rngStrokeW" min="0" max="250" step="2" value="${layer.strokeWidth ?? 20}" />
+              <input type="range" id="rngStrokeW" min="1" max="250" step="1" value="${layer.strokeWidth ?? 20}" />
               <input type="number" id="numStrokeW" value="${layer.strokeWidth ?? 20}" style="width:70px" />
             </div>
           </div>` : ''}
@@ -835,12 +1062,16 @@ class GroundStudioApp {
           <div class="field-grid-2">
             <div class="field-row">
               <div class="field-label"><span>虚线实长 (Dash UU, 0=实线)</span></div>
-              <input type="number" id="numDashLen" value="${layer.dashLength || 0}" min="0" max="1000" step="10" />
+              <input type="number" id="numDashLen" value="${layer.dashLength || 0}" min="0" max="1000" step="5" />
             </div>
             <div class="field-row">
               <div class="field-label"><span>虚线空隙 (Gap UU)</span></div>
-              <input type="number" id="numGapLen" value="${layer.gapLength || 0}" min="0" max="1000" step="10" />
+              <input type="number" id="numGapLen" value="${layer.gapLength || 0}" min="0" max="1000" step="5" />
             </div>
+          </div>
+          <div class="field-row">
+            <div class="field-label"><span>虚线相位偏移 (Dash Offset UU)</span></div>
+            <input type="number" id="numDashOffset" value="${layer.dashOffset || 0}" step="10" />
           </div>
 
           <div class="field-row">
@@ -882,23 +1113,34 @@ class GroundStudioApp {
   }
 
   bindInspectorEvents(layer) {
+    const syncJsonBox = () => {
+      const txtJson = document.getElementById('txtSingleLayerJson');
+      if (txtJson && document.getElementById('singleLayerJsonBox')?.style.display !== 'none') {
+        txtJson.value = JSON.stringify(layer, null, 2);
+      }
+    };
+
     const bindVal = (id, prop, isNum = true, rerenderInspector = false) => {
       const el = document.getElementById(id);
       if (!el) return;
       el.oninput = (e) => {
         layer[prop] = isNum ? parseFloat(e.target.value) || 0 : e.target.value;
         if (prop === 'name') this.renderLayerList();
+        syncJsonBox();
         if (rerenderInspector) this.renderInspector();
         this.saveAndRenderCanvas();
       };
     };
 
     bindVal('inspName', 'name', false);
+    bindVal('numTrimStart', 'trimStart', true, layer.type === 'rect_or_line');
+    bindVal('numTrimEnd', 'trimEnd', true, layer.type === 'rect_or_line');
 
     const chkCutSafe = document.getElementById('chkCutBySafeArea');
     if (chkCutSafe) {
       chkCutSafe.onchange = (e) => {
         layer.cutBySmallPadSafeArea = e.target.checked;
+        syncJsonBox();
         this.saveAndRenderCanvas();
       };
     }
@@ -907,11 +1149,21 @@ class GroundStudioApp {
     if (chkHugInner) {
       chkHugInner.onchange = (e) => {
         layer.hugInnerEdge = e.target.checked;
+        syncJsonBox();
         this.saveAndRenderCanvas();
       };
     }
 
-    const bindPair = (rngId, numId, lblId, prop, unit = '', rerender = false) => {
+    const chkSpawnHugOuter = document.getElementById('chkSpawnHugOuter');
+    if (chkSpawnHugOuter) {
+      chkSpawnHugOuter.onchange = (e) => {
+        layer.hugOuterEdge = e.target.checked;
+        syncJsonBox();
+        this.saveAndRenderCanvas();
+      };
+    }
+
+    const bindPair = (rngId, numId, lblId, prop, unit = '', rerender = false, customFmt = null) => {
       const rng = document.getElementById(rngId);
       const num = document.getElementById(numId);
       const lbl = document.getElementById(lblId);
@@ -921,7 +1173,8 @@ class GroundStudioApp {
         layer[prop] = v;
         rng.value = v;
         num.value = v;
-        if (lbl) lbl.textContent = `${v}${unit}`;
+        if (lbl) lbl.textContent = customFmt ? customFmt(v) : `${v}${unit}`;
+        syncJsonBox();
         if (rerender) this.renderInspector();
         this.saveAndRenderCanvas();
       };
@@ -930,10 +1183,15 @@ class GroundStudioApp {
     };
 
     bindPair('rngInsetDist', 'numInsetDist', 'lblInsetDist', 'insetDist', ' UU');
+    bindPair('rngMidExpand', 'numMidExpand', 'lblMidExpand', 'midXExpand', ' UU', true, (v) => `+${v} UU (X=${2048 + v})`);
     bindPair('rngRadius', 'numRadius', 'lblRadius', 'radius', ' UU');
     bindPair('rngInwardW', 'numInwardW', 'lblInwardW', 'inwardWidth', ' UU', true);
+    bindPair('rngCornerLen', 'numCornerLen', 'lblCornerLen', 'cornerLength', ' UU');
     bindPair('rngStrokeW', 'numStrokeW', 'lblStrokeW', 'strokeWidth', ' UU');
     bindPair('rngGray', 'numGray', 'lblGray', 'gray', '');
+
+    bindVal('numSplineTension', 'tension', true);
+    bindVal('selEndSlopeMode', 'endSlopeMode', false);
 
     bindVal('inspBaseContour', 'baseContour', false);
     bindVal('numCx', 'cx', true);
@@ -954,6 +1212,34 @@ class GroundStudioApp {
       };
     }
 
+    const selAnchor1 = document.getElementById('inspLineAnchor1');
+    if (selAnchor1) {
+      selAnchor1.onchange = (e) => {
+        const found = Q1_NAMED_ANCHORS.find(a => a.id === e.target.value);
+        if (found) {
+          layer.anchor1 = found.id;
+          layer.x1 = found.x;
+          layer.y1 = found.y;
+          this.renderInspector();
+          this.saveAndRenderCanvas();
+        }
+      };
+    }
+
+    const selAnchor2 = document.getElementById('inspLineAnchor2');
+    if (selAnchor2) {
+      selAnchor2.onchange = (e) => {
+        const found = Q1_NAMED_ANCHORS.find(a => a.id === e.target.value);
+        if (found) {
+          layer.anchor2 = found.id;
+          layer.x2 = found.x;
+          layer.y2 = found.y;
+          this.renderInspector();
+          this.saveAndRenderCanvas();
+        }
+      };
+    }
+
     const bindPickBtn = (btnId, targetKey) => {
       const btn = document.getElementById(btnId);
       if (!btn) return;
@@ -966,6 +1252,8 @@ class GroundStudioApp {
     bindPickBtn('btnPickP1', 'p1');
     bindPickBtn('btnPickP2', 'p2');
     bindPickBtn('btnPickP3', 'p3');
+    bindPickBtn('btnPickSegP1', 'seg_p1');
+    bindPickBtn('btnPickSegP2', 'seg_p2');
 
     bindVal('numP1X', 'x1', true, true);
     bindVal('numP1Y', 'y1', true, true);
@@ -978,22 +1266,22 @@ class GroundStudioApp {
     if (chk3Pt) {
       chk3Pt.onchange = (e) => {
         layer.fullCircle = e.target.checked;
+        syncJsonBox();
         this.saveAndRenderCanvas();
       };
     }
 
-    bindVal('inspRectSubMode', 'subMode', false);
-    bindVal('numRectX1', 'x1', true);
-    bindVal('numRectY1', 'y1', true);
-    bindVal('numRectX2', 'x2', true);
-    bindVal('numRectY2', 'y2', true);
-    bindVal('numCornerRad', 'cornerRadius', true);
+    bindVal('inspRectSubMode', 'subMode', false, true);
+    bindVal('numRectX1', 'x1', true, true);
+    bindVal('numRectY1', 'y1', true, true);
+    bindVal('numRectX2', 'x2', true, true);
+    bindVal('numRectY2', 'y2', true, true);
 
     bindVal('inspTargetPads', 'targetPads', false);
     bindVal('numInsetFromPickup', 'insetFromPickup', true, true);
 
     bindVal('inspTargetSpawns', 'targetSpawns', false);
-    bindVal('inspSpawnShape', 'shape', false);
+    bindVal('inspSpawnShape', 'shape', false, true);
     bindVal('numSpawnMargin', 'expandMargin', true);
 
     bindVal('inspStripeOrient', 'orientation', false);
@@ -1002,6 +1290,7 @@ class GroundStudioApp {
 
     bindVal('numDashLen', 'dashLength', true);
     bindVal('numGapLen', 'gapLength', true);
+    bindVal('numDashOffset', 'dashOffset', true);
     bindVal('numFillGray', 'fillGray', true);
 
     bindVal('numClipXMin', 'clipXMin', true);
@@ -1020,13 +1309,17 @@ class GroundStudioApp {
       mode: 'q1',
       includeReference: true,
       useShaderPreview: useShader,
-      activeLayerId: this.selectedLayerId
+      activeLayerId: this.selectedLayerId,
+      hoveredLayerId: this.hoveredLayerId,
+      snappedAnchor: this.snappedAnchor
     });
     const svgFull = buildArenaSvgString(this.project, {
       mode: 'full_mirror',
       includeReference: true,
       useShaderPreview: useShader,
-      activeLayerId: this.selectedLayerId
+      activeLayerId: this.selectedLayerId,
+      hoveredLayerId: this.hoveredLayerId,
+      snappedAnchor: this.snappedAnchor
     });
 
     const stageQ1 = document.getElementById('stageQ1');
@@ -1072,37 +1365,94 @@ class GroundStudioApp {
 
     svgEl.onmousemove = (evt) => {
       const pt = clientToUU(evt);
-      document.getElementById('lblCursorCoord').textContent =
-        `X: ${pt.x} UU, Y: ${pt.y} UU (Q1: ${pt.q1x}, ${pt.q1y})`;
+      const snap = this.magneticSnapEnabled ? findNearestAnchor(pt.q1x, pt.q1y, Q1_NAMED_ANCHORS, 250) : null;
+
+      document.getElementById('lblCursorCoord').textContent = snap
+        ? `🧲 吸附 [${snap.code}] (${snap.x}, ${snap.y}) UU`
+        : `X: ${pt.x} UU, Y: ${pt.y} UU (Q1: ${pt.q1x}, ${pt.q1y})`;
+
+      // Find nearest layer to cursor for hover highlight
+      let bestLayer = null;
+      let bestDist = 140;
+      for (const l of this.project.layers) {
+        if (!l.visible) continue;
+        const d = distanceToLayerQ1(l, pt.q1x, pt.q1y);
+        if (d < bestDist) {
+          bestDist = d;
+          bestLayer = l;
+        }
+      }
+
+      const hoverLbl = document.getElementById('lblHoverLayer');
+      if (bestLayer) {
+        hoverLbl.textContent = `🔍 靠近图层: [${bestLayer.name}] (点击直接选中)`;
+      } else {
+        hoverLbl.textContent = '';
+      }
+
+      const prevHoverId = this.hoveredLayerId;
+      const prevSnapId = this.snappedAnchor?.id || null;
+      this.hoveredLayerId = bestLayer?.id || null;
+      this.snappedAnchor = this.pickTarget ? snap : null;
+
+      if (prevHoverId !== this.hoveredLayerId || prevSnapId !== (this.snappedAnchor?.id || null)) {
+        this.saveAndRenderCanvas();
+      }
     };
 
     svgEl.onclick = (evt) => {
       const pt = clientToUU(evt);
-      const layer = this.getSelectedLayer();
-      if (!layer || !this.pickTarget) return;
+      const snap = this.magneticSnapEnabled ? findNearestAnchor(pt.q1x, pt.q1y, Q1_NAMED_ANCHORS, 250) : null;
+      const targetX = snap ? snap.x : pt.q1x;
+      const targetY = snap ? snap.y : pt.q1y;
 
-      if (this.pickTarget === 'center' && layer.type === 'circle_arc') {
-        layer.cx = pt.q1x;
-        layer.cy = pt.q1y;
-        this.pickTarget = null;
-      } else if (layer.type === 'three_point_arc') {
-        if (this.pickTarget === 'p1') {
-          layer.x1 = pt.q1x;
-          layer.y1 = pt.q1y;
-          this.pickTarget = 'p2';
-        } else if (this.pickTarget === 'p2') {
-          layer.x2 = pt.q1x;
-          layer.y2 = pt.q1y;
-          this.pickTarget = 'p3';
-        } else if (this.pickTarget === 'p3') {
-          layer.x3 = pt.q1x;
-          layer.y3 = pt.q1y;
+      const layer = this.getSelectedLayer();
+
+      if (layer && this.pickTarget) {
+        if (this.pickTarget === 'center' && layer.type === 'circle_arc') {
+          layer.cx = targetX;
+          layer.cy = targetY;
           this.pickTarget = null;
+        } else if (layer.type === 'rect_or_line') {
+          if (this.pickTarget === 'seg_p1') {
+            layer.x1 = targetX;
+            layer.y1 = targetY;
+            if (snap) layer.anchor1 = snap.id;
+            this.pickTarget = 'seg_p2'; // Auto-advance to P2!
+          } else if (this.pickTarget === 'seg_p2') {
+            layer.x2 = targetX;
+            layer.y2 = targetY;
+            if (snap) layer.anchor2 = snap.id;
+            this.pickTarget = null;
+          }
+        } else if (layer.type === 'three_point_arc') {
+          if (this.pickTarget === 'p1') {
+            layer.x1 = targetX;
+            layer.y1 = targetY;
+            this.pickTarget = 'p2';
+          } else if (this.pickTarget === 'p2') {
+            layer.x2 = targetX;
+            layer.y2 = targetY;
+            this.pickTarget = 'p3';
+          } else if (this.pickTarget === 'p3') {
+            layer.x3 = targetX;
+            layer.y3 = targetY;
+            this.pickTarget = null;
+          }
         }
+        this.snappedAnchor = null;
+        this.renderInspector();
+        this.saveAndRenderCanvas();
+        return;
       }
 
-      this.renderInspector();
-      this.saveAndRenderCanvas();
+      // If not in point-picking mode, clicking near any line on the canvas selects that layer!
+      if (this.hoveredLayerId && this.hoveredLayerId !== this.selectedLayerId) {
+        this.selectedLayerId = this.hoveredLayerId;
+        this.renderLayerList();
+        this.renderInspector();
+        this.saveAndRenderCanvas();
+      }
     };
   }
 

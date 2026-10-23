@@ -5,7 +5,7 @@
  */
 
 export const DEFAULT_PROJECT = {
-  version: '2.0.0',
+  version: '2.1.0',
   name: 'Minimal Soccar Ground v2',
   canvasScope: 'pitch_and_goal', // 'pitch_only' (4096x5120 Q1) | 'pitch_and_goal' (4096x6000 Q1) | 'driftwoods_uv' (3840x5755.61 Q1)
   backgroundGray: 0,
@@ -23,15 +23,16 @@ export const DEFAULT_PROJECT = {
   },
 
   referenceOverlays: {
-    showGrid: true,
+    showGrid: false,
     showFlatFloorZ0: true,
     showOuterWall: false,
     showGoalBox: true,
     showBoostPads: true,
+    showPadNumbers: true,
     showSmallPadSafeArea: true,
     showBoostPadLockBoxes: false,
     showSpawns: false,
-    showHitboxPreset: 'octane',
+    showHitboxPreset: 'all',
     customSvgContent: null,
     customSvgOpacity: 0.45,
     customSvgVisible: true
@@ -43,13 +44,13 @@ export const DEFAULT_PROJECT = {
       name: '1. 紧贴绿虚线内缩边线 (Z=0 内侧)',
       type: 'contour_offset',
       visible: true,
-      baseContour: 'full_flat_floor', // 'full_flat_floor' (Z=0 w/ goal) | 'pitch_flat_floor' (Z=0 pitch) | 'outer_wall'
-      hugInnerEdge: true, // Automatically shifts center path inward by strokeWidth/2 so outer edge touches the Z=0 green dashed line
-      insetDist: 0, // Extra inward offset beyond hugging the edge (0 = tight against green dashed line)
+      baseContour: 'full_flat_floor',
+      hugInnerEdge: true,
+      insetDist: 0,
       strokeWidth: 20,
       gray: 255,
       fillGray: -1,
-      opacity: 1.0,
+      opacity: 1,
       dashLength: 0,
       gapLength: 0,
       dashOffset: 0,
@@ -63,13 +64,13 @@ export const DEFAULT_PROJECT = {
     },
     {
       id: 'layer_all_boost_inward_20',
-      name: '2. 所有 Boost Pad 判定圆内收 20UU',
+      name: '2. 所有 Boost Pad 判定圆内收 10UU',
       type: 'boost_pad_group',
       visible: true,
-      targetPads: 'both', // 'big' (R=208 -> 188..208) | 'small' (R=144 -> 124..144) | 'both'
-      ringMode: 'inward_from_pickup', // 'inward_from_pickup' | 'custom_radius'
-      inwardWidth: 20, // Draws from (R_pickup - insetFromPickup - inwardWidth) to (R_pickup - insetFromPickup)
-      insetFromPickup: 0, // 0 = outer edge of stroke is exact pickup circle
+      targetPads: 'both',
+      ringMode: 'inward_from_pickup',
+      inwardWidth: 10,
+      insetFromPickup: 0,
       radius: 134,
       strokeWidth: 20,
       gray: 255,
@@ -79,7 +80,7 @@ export const DEFAULT_PROJECT = {
       outerDashLength: 30,
       outerGapLength: 24,
       outerDashGray: 160,
-      opacity: 1.0,
+      opacity: 1,
       dashLength: 0,
       gapLength: 0,
       clipXMin: 0,
@@ -96,14 +97,102 @@ export const DEFAULT_PROJECT = {
       cx: 0,
       cy: 0,
       radius: 1024,
-      startDeg: 0,
+      startDeg: 2.5,
       endDeg: 90,
+      trimStart: 0,
+      trimEnd: 0,
       strokeWidth: 20,
       gray: 255,
       fillGray: -1,
-      opacity: 1.0,
+      opacity: 1,
+      dashLength: 80,
+      gapLength: 100,
+      dashOffset: 0,
+      lineCap: 'butt',
+      cutBySmallPadSafeArea: true,
+      clipXMin: 0,
+      clipXMax: 4096,
+      clipYMin: 0,
+      clipYMax: 6000
+    },
+    {
+      id: 'layer_spawn_union_corners',
+      name: '4. 车辆生成点全碰撞箱最小包围框四角',
+      type: 'spawn_marker_group',
+      visible: true,
+      targetSpawns: 'both', // 'kickoff' | 'demo' | 'both'
+      shape: 'union_corners', // 'union_corners' | 'union_rect' | 'hitbox_outline' | 'circle' | 'crosshair'
+      hitboxPreset: 'octane',
+      cornerLength: 28,
+      expandMargin: 0,
+      hugOuterEdge: true, // Shifts corner stroke center outward by strokeWidth/2 so inner edge hugs exact union AABB
+      strokeWidth: 8,
+      gray: 255,
+      fillGray: -1,
+      opacity: 1,
       dashLength: 0,
       gapLength: 0,
+      lineCap: 'square',
+      lineJoin: 'miter',
+      cutBySmallPadSafeArea: false,
+      clipXMin: 0,
+      clipXMax: 4096,
+      clipYMin: 0,
+      clipYMax: 6000
+    },
+    {
+      id: 'layer_monotone_5pad_oval',
+      name: '5. 五点斜率单调橄榄球曲线 (#IX1外扩→S3→S4→S7→S9)',
+      type: 'monotone_pad_spline',
+      visible: true,
+      midXExpand: 112, // Shifts P1 from (2048, 0) to (2160, 0) so P1->#S3(2048,1036) is a smooth curve with dX/dY=0 at Y=0
+      p2x: 2048,
+      p2y: 1036,
+      p3x: 1788,
+      p3y: 2300,
+      p4x: 940,
+      p4y: 3308,
+      p5x: 0,
+      p5y: 4240,
+      tension: 0.55,
+      endSlopeMode: 'natural_pointed', // 'natural_pointed' | 'flat_x0'
+      trimStart: 0,
+      trimEnd: 0,
+      strokeWidth: 18,
+      gray: 255,
+      fillGray: -1,
+      opacity: 1,
+      dashLength: 75,
+      gapLength: 85,
+      dashOffset: 0,
+      lineCap: 'butt',
+      cutBySmallPadSafeArea: true,
+      clipXMin: 0,
+      clipXMax: 4096,
+      clipYMin: 0,
+      clipYMax: 6000
+    },
+    {
+      id: 'layer_ko1_to_s4_dash',
+      name: '6. 锚点连线示例 (#KO1斜向车位 → #S4小垫, 首尾跳过)',
+      type: 'rect_or_line',
+      visible: true,
+      subMode: 'custom_segment',
+      anchor1: 'ko_diag',
+      anchor2: 'pad_sm_1788_2300',
+      x1: 2048,
+      y1: 2560,
+      x2: 1788,
+      y2: 2300,
+      trimStart: 85,
+      trimEnd: 0,
+      strokeWidth: 12,
+      gray: 255,
+      fillGray: -1,
+      cornerRadius: 0,
+      opacity: 1,
+      dashLength: 28,
+      gapLength: 28,
       dashOffset: 0,
       lineCap: 'butt',
       cutBySmallPadSafeArea: true,
@@ -119,6 +208,8 @@ export function createNewLayerTemplate(type, index = 1) {
   const id = `layer_${type}_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
   const baseClip = {
     opacity: 1.0,
+    trimStart: 0,
+    trimEnd: 0,
     cutBySmallPadSafeArea: true,
     clipXMin: 0,
     clipXMax: 4096,
@@ -127,6 +218,79 @@ export function createNewLayerTemplate(type, index = 1) {
   };
 
   switch (type) {
+    case 'monotone_pad_spline':
+      return {
+        id,
+        name: `${index}. 五点斜率单调橄榄球曲线`,
+        type: 'monotone_pad_spline',
+        visible: true,
+        midXExpand: 112,
+        p2x: 2048,
+        p2y: 1036,
+        p3x: 1788,
+        p3y: 2300,
+        p4x: 940,
+        p4y: 3308,
+        p5x: 0,
+        p5y: 4240,
+        tension: 0.55,
+        endSlopeMode: 'natural_pointed',
+        strokeWidth: 18,
+        gray: 255,
+        fillGray: -1,
+        dashLength: 75,
+        gapLength: 85,
+        dashOffset: 0,
+        lineCap: 'butt',
+        ...baseClip
+      };
+    case 'rect_or_line':
+      return {
+        id,
+        name: `${index}. 锚点吸附直线/虚线 (支持首尾跳过)`,
+        type: 'rect_or_line',
+        visible: true,
+        subMode: 'custom_segment',
+        anchor1: 'ko_diag',
+        anchor2: 'pad_big_corner',
+        x1: 2048,
+        y1: 2560,
+        x2: 3072,
+        y2: 4096,
+        trimStart: 90,
+        trimEnd: 220,
+        strokeWidth: 14,
+        gray: 255,
+        fillGray: -1,
+        cornerRadius: 0,
+        dashLength: 45,
+        gapLength: 45,
+        dashOffset: 0,
+        lineCap: 'butt',
+        ...baseClip
+      };
+    case 'spawn_marker_group':
+      return {
+        id,
+        name: `${index}. 车辆生成点全碰撞箱最小包围四角`,
+        type: 'spawn_marker_group',
+        visible: true,
+        targetSpawns: 'both',
+        shape: 'union_corners',
+        hitboxPreset: 'octane',
+        cornerLength: 28,
+        expandMargin: 0,
+        hugOuterEdge: true,
+        strokeWidth: 8,
+        gray: 255,
+        fillGray: -1,
+        dashLength: 0,
+        gapLength: 0,
+        lineCap: 'square',
+        lineJoin: 'miter',
+        ...baseClip,
+        cutBySmallPadSafeArea: false
+      };
     case 'contour_offset':
       return {
         id,
@@ -150,7 +314,7 @@ export function createNewLayerTemplate(type, index = 1) {
     case 'circle_arc':
       return {
         id,
-        name: `${index}. 定点圆 / 圆弧 (可被 SafeArea 截断)`,
+        name: `${index}. 定点圆 / 圆弧 (支持首尾跳过 & SafeArea截断)`,
         type: 'circle_arc',
         visible: true,
         anchorId: 'center',
@@ -162,8 +326,8 @@ export function createNewLayerTemplate(type, index = 1) {
         strokeWidth: 20,
         gray: 255,
         fillGray: -1,
-        dashLength: 0,
-        gapLength: 0,
+        dashLength: 80,
+        gapLength: 100,
         dashOffset: 0,
         lineCap: 'butt',
         ...baseClip
@@ -171,40 +335,21 @@ export function createNewLayerTemplate(type, index = 1) {
     case 'three_point_arc':
       return {
         id,
-        name: `${index}. 三点连线圆弧 (可被 SafeArea 截断)`,
+        name: `${index}. 三点连线圆弧`,
         type: 'three_point_arc',
         visible: true,
-        x1: 1024,
-        y1: 0,
-        x2: 724,
-        y2: 724,
-        x3: 0,
-        y3: 1024,
+        x1: 2048,
+        y1: 1036,
+        x2: 1788,
+        y2: 2300,
+        x3: 940,
+        y3: 3308,
         fullCircle: false,
         strokeWidth: 20,
         gray: 255,
         dashLength: 0,
         gapLength: 0,
         lineCap: 'butt',
-        ...baseClip
-      };
-    case 'rect_or_line':
-      return {
-        id,
-        name: `${index}. 直线段 / 矩形框 (可被 SafeArea 截断)`,
-        type: 'rect_or_line',
-        visible: true,
-        subMode: 'hline_y0',
-        x1: 0,
-        y1: 0,
-        x2: 3820,
-        y2: 0,
-        strokeWidth: 20,
-        gray: 255,
-        fillGray: -1,
-        cornerRadius: 0,
-        dashLength: 0,
-        gapLength: 0,
         ...baseClip
       };
     case 'boost_pad_group':
@@ -215,7 +360,7 @@ export function createNewLayerTemplate(type, index = 1) {
         visible: true,
         targetPads: 'both',
         ringMode: 'inward_from_pickup',
-        inwardWidth: 20,
+        inwardWidth: 10,
         insetFromPickup: 0,
         radius: 134,
         strokeWidth: 20,
@@ -226,24 +371,6 @@ export function createNewLayerTemplate(type, index = 1) {
         outerDashLength: 32,
         outerGapLength: 24,
         outerDashGray: 160,
-        ...baseClip,
-        cutBySmallPadSafeArea: false
-      };
-    case 'spawn_marker_group':
-      return {
-        id,
-        name: `${index}. 出生/复活点地面框`,
-        type: 'spawn_marker_group',
-        visible: true,
-        targetSpawns: 'both',
-        shape: 'hitbox_outline',
-        hitboxPreset: 'octane',
-        expandMargin: 16,
-        strokeWidth: 16,
-        gray: 220,
-        fillGray: -1,
-        dashLength: 30,
-        gapLength: 20,
         ...baseClip,
         cutBySmallPadSafeArea: false
       };

@@ -26,7 +26,6 @@ export const ARENA_CONSTANTS = {
 
 /**
  * Q1 (+X, +Y) contour where the flat floor (Z = 0) meets the wall/corner/goal ramps.
- * Ordered from (+X, 0) along side wall -> 45° corner -> back wall -> goal mouth -> (0, +Y).
  */
 export const Q1_FLAT_FLOOR_CONTOUR = [
   [3840.00, 0.00],
@@ -70,7 +69,6 @@ export const Q1_FLAT_FLOOR_CONTOUR = [
 
 /**
  * Pitch-only flat floor contour in Q1 (clamped at goal line Y = 4964.95 without entering goal).
- * Ideal for drawing the main pitch perimeter line (touchline + corner arc + goal line).
  */
 export const Q1_PITCH_FLAT_FLOOR_CONTOUR = [
   [3840.00, 0.00],
@@ -133,9 +131,6 @@ export const Q1_OUTER_WALL_CONTOUR = [
   [0.00, 5995.55]
 ];
 
-/**
- * Pitch-only Outer Wall contour in Q1 (clamped at Y = 5120 goal line).
- */
 export const Q1_PITCH_OUTER_WALL_CONTOUR = [
   [4096.00, 0.00],
   [4096.00, 3559.40],
@@ -161,38 +156,39 @@ export const Q1_PITCH_OUTER_WALL_CONTOUR = [
 ];
 
 /**
- * Boost Pad locations in Q1 (+X >= 0, +Y >= 0).
- * Pads on X=0 or Y=0 axes are marked with onAxisX / onAxisY.
+ * Numbered Boost Pad locations in Q1 (+X >= 0, +Y >= 0).
+ * Big Pads: #B1, #B2
+ * Small Pads: #S1 .. #S9
  */
 export const Q1_BOOST_PADS_BIG = [
-  { id: 'big_side', x: 3584.0, y: 0.0, z: 73.0, isBig: true, onAxisY: true, label: 'Side Big (3584, 0)' },
-  { id: 'big_corner', x: 3072.0, y: 4096.0, z: 73.0, isBig: true, label: 'Corner Big (3072, 4096)' }
+  { id: 'big_side', code: 'B1', num: 1, x: 3584.0, y: 0.0, z: 73.0, isBig: true, onAxisY: true, label: '#B1 中场大垫 (3584, 0)' },
+  { id: 'big_corner', code: 'B2', num: 2, x: 3072.0, y: 4096.0, z: 73.0, isBig: true, label: '#B2 底角大垫 (3072, 4096)' }
 ];
 
 export const Q1_BOOST_PADS_SMALL = [
-  { id: 'sm_mid_x', x: 1024.0, y: 0.0, z: 70.0, isBig: false, onAxisY: true, label: 'Center X (1024, 0)' },
-  { id: 'sm_mid_y', x: 0.0, y: 1024.0, z: 70.0, isBig: false, onAxisX: true, label: 'Center Y (0, 1024)' },
-  { id: 'sm_diag_inner', x: 2048.0, y: 1036.0, z: 70.0, isBig: false, label: 'Mid Flank (2048, 1036)' },
-  { id: 'sm_diag_mid', x: 1788.0, y: 2300.0, z: 70.0, isBig: false, label: 'Diag Mid (1788, 2300)' },
-  { id: 'sm_side_wall', x: 3584.0, y: 2484.0, z: 70.0, isBig: false, label: 'Side Wall (3584, 2484)' },
-  { id: 'sm_center_mid', x: 0.0, y: 2816.0, z: 70.0, isBig: false, onAxisX: true, label: 'Spine Mid (0, 2816)' },
-  { id: 'sm_slot_inner', x: 940.0, y: 3308.0, z: 70.0, isBig: false, label: 'Box Corner (940, 3308)' },
-  { id: 'sm_back_flank', x: 1792.0, y: 4184.0, z: 70.0, isBig: false, label: 'Back Flank (1792, 4184)' },
-  { id: 'sm_goal_front', x: 0.0, y: 4240.0, z: 70.0, isBig: false, onAxisX: true, label: 'Goal Front (0, 4240)' }
+  { id: 'sm_mid_x', code: 'S1', num: 1, x: 1024.0, y: 0.0, z: 70.0, isBig: false, onAxisY: true, label: '#S1 中圈横轴小垫 (1024, 0)' },
+  { id: 'sm_mid_y', code: 'S2', num: 2, x: 0.0, y: 1024.0, z: 70.0, isBig: false, onAxisX: true, label: '#S2 中圈纵轴小垫 (0, 1024)' },
+  { id: 'sm_diag_inner', code: 'S3', num: 3, x: 2048.0, y: 1036.0, z: 70.0, isBig: false, label: '#S3 橄榄球弧1 (2048, 1036)' },
+  { id: 'sm_diag_mid', code: 'S4', num: 4, x: 1788.0, y: 2300.0, z: 70.0, isBig: false, label: '#S4 橄榄球弧2 (1788, 2300)' },
+  { id: 'sm_side_wall', code: 'S5', num: 5, x: 3584.0, y: 2484.0, z: 70.0, isBig: false, label: '#S5 边墙小垫 (3584, 2484)' },
+  { id: 'sm_center_mid', code: 'S6', num: 6, x: 0.0, y: 2816.0, z: 70.0, isBig: false, onAxisX: true, label: '#S6 中轴腰部小垫 (0, 2816)' },
+  { id: 'sm_slot_inner', code: 'S7', num: 7, x: 940.0, y: 3308.0, z: 70.0, isBig: false, label: '#S7 橄榄球弧3 (940, 3308)' },
+  { id: 'sm_back_flank', code: 'S8', num: 8, x: 1792.0, y: 4184.0, z: 70.0, isBig: false, label: '#S8 后场侧翼小垫 (1792, 4184)' },
+  { id: 'sm_goal_front', code: 'S9', num: 9, x: 0.0, y: 4240.0, z: 70.0, isBig: false, onAxisX: true, label: '#S9 门前中心小垫 (0, 4240)' }
 ];
 
 /**
  * Kickoff & Demo Respawn Positions in Q1 (+X >= 0, +Y >= 0).
  */
 export const Q1_KICKOFF_SPAWNS = [
-  { id: 'ko_diag', name: 'Kickoff Diagonal', x: 2048.0, y: 2560.0, z: 17.0, yawDeg: 225.0 },
-  { id: 'ko_back_off', name: 'Kickoff Back Offset', x: 256.0, y: 3840.0, z: 17.0, yawDeg: 270.0 },
-  { id: 'ko_goalie', name: 'Kickoff Goalie Center', x: 0.0, y: 4608.0, z: 17.0, yawDeg: 270.0 }
+  { id: 'ko_diag', code: 'KO1', name: '#KO1 斜向开球点', x: 2048.0, y: 2560.0, z: 17.0, yawDeg: 225.0 },
+  { id: 'ko_back_off', code: 'KO2', name: '#KO2 后场偏置开球点', x: 256.0, y: 3840.0, z: 17.0, yawDeg: 270.0 },
+  { id: 'ko_goalie', code: 'KO3', name: '#KO3 门前中轴开球点', x: 0.0, y: 4608.0, z: 17.0, yawDeg: 270.0 }
 ];
 
 export const Q1_DEMO_RESPAWNS = [
-  { id: 'demo_inner', name: 'Demo Slot Inner', x: 2304.0, y: 4608.0, z: 36.0, yawDeg: 270.0 },
-  { id: 'demo_outer', name: 'Demo Slot Outer', x: 2688.0, y: 4608.0, z: 36.0, yawDeg: 270.0 }
+  { id: 'demo_inner', code: 'DM1', name: '#DM1 复活点内侧', x: 2304.0, y: 4608.0, z: 36.0, yawDeg: 270.0 },
+  { id: 'demo_outer', code: 'DM2', name: '#DM2 复活点外侧', x: 2688.0, y: 4608.0, z: 36.0, yawDeg: 270.0 }
 ];
 
 /**
@@ -209,27 +205,51 @@ export const HITBOX_PRESETS = [
 ];
 
 /**
- * Named Snap/Anchor Points in Q1 for quick anchoring of circles, arcs, and lines.
+ * Minimal Bounding Rectangle (AABB Union) enclosing ALL 7 Car Hitbox Presets in car local coordinates.
+ * - Rearmost edge: Plank (offsetX 9.00857 - 131.32/2 = -56.65143 UU)
+ * - Frontmost edge: Breakout (offsetX 12.5 + 133.992/2 = +79.49600 UU)
+ * - Widest lateral edges: Plank (±87.1704/2 = ±43.58520 UU)
+ */
+export const ALL_HITBOX_UNION_BOUNDS = (() => {
+  const minX = Math.min(...HITBOX_PRESETS.map(p => p.offsetX - p.length * 0.5));
+  const maxX = Math.max(...HITBOX_PRESETS.map(p => p.offsetX + p.length * 0.5));
+  const minY = Math.min(...HITBOX_PRESETS.map(p => p.offsetY - p.width * 0.5));
+  const maxY = Math.max(...HITBOX_PRESETS.map(p => p.offsetY + p.width * 0.5));
+  return {
+    minX,
+    maxX,
+    minY,
+    maxY,
+    length: maxX - minX,
+    width: maxY - minY,
+    centerX: (minX + maxX) * 0.5,
+    centerY: (minY + maxY) * 0.5
+  };
+})();
+
+/**
+ * Named Snap/Anchor Points in Q1 for quick anchoring and magnetic cursor snapping.
  */
 export const Q1_NAMED_ANCHORS = [
-  { id: 'center', label: 'Center Origin (0, 0)', x: 0, y: 0 },
-  { id: 'goal_center', label: 'Goal Line Center (0, 5120)', x: 0, y: 5120 },
-  { id: 'goal_post_mesh', label: 'Goal Post Mesh (896, 5120)', x: 896, y: 5120 },
-  { id: 'goal_post_flat', label: 'Goal Post Flat Floor (804.95, 5128)', x: 804.95, y: 5127.96 },
-  { id: 'ko_diag', label: 'Kickoff Diagonal (2048, 2560)', x: 2048, y: 2560 },
-  { id: 'ko_back', label: 'Kickoff Back (256, 3840)', x: 256, y: 3840 },
-  { id: 'ko_goalie', label: 'Kickoff Goalie (0, 4608)', x: 0, y: 4608 },
-  { id: 'demo_inner', label: 'Demo Inner (2304, 4608)', x: 2304, y: 4608 },
-  { id: 'demo_outer', label: 'Demo Outer (2688, 4608)', x: 2688, y: 4608 },
-  { id: 'pad_big_side', label: 'Big Pad Side (3584, 0)', x: 3584, y: 0 },
-  { id: 'pad_big_corner', label: 'Big Pad Corner (3072, 4096)', x: 3072, y: 4096 },
-  { id: 'pad_sm_1024_0', label: 'Small Pad (1024, 0)', x: 1024, y: 0 },
-  { id: 'pad_sm_0_1024', label: 'Small Pad (0, 1024)', x: 0, y: 1024 },
-  { id: 'pad_sm_2048_1036', label: 'Small Pad (2048, 1036)', x: 2048, y: 1036 },
-  { id: 'pad_sm_1788_2300', label: 'Small Pad (1788, 2300)', x: 1788, y: 2300 },
-  { id: 'pad_sm_3584_2484', label: 'Small Pad (3584, 2484)', x: 3584, y: 2484 },
-  { id: 'pad_sm_0_2816', label: 'Small Pad (0, 2816)', x: 0, y: 2816 },
-  { id: 'pad_sm_940_3308', label: 'Small Pad (940, 3308)', x: 940, y: 3308 },
-  { id: 'pad_sm_1792_4184', label: 'Small Pad (1792, 4184)', x: 1792, y: 4184 },
-  { id: 'pad_sm_0_4240', label: 'Small Pad (0, 4240)', x: 0, y: 4240 }
+  { id: 'pad_sm_1024_0', code: 'S1', label: '#S1 中圈横轴小垫 (1024, 0)', x: 1024, y: 0 },
+  { id: 'pad_sm_0_1024', code: 'S2', label: '#S2 中圈纵轴小垫 (0, 1024)', x: 0, y: 1024 },
+  { id: 'pad_sm_2048_1036', code: 'S3', label: '#S3 橄榄球弧1小垫 (2048, 1036)', x: 2048, y: 1036 },
+  { id: 'pad_sm_1788_2300', code: 'S4', label: '#S4 橄榄球弧2小垫 (1788, 2300)', x: 1788, y: 2300 },
+  { id: 'pad_sm_3584_2484', code: 'S5', label: '#S5 边墙小垫 (3584, 2484)', x: 3584, y: 2484 },
+  { id: 'pad_sm_0_2816', code: 'S6', label: '#S6 中轴腰部小垫 (0, 2816)', x: 0, y: 2816 },
+  { id: 'pad_sm_940_3308', code: 'S7', label: '#S7 橄榄球弧3小垫 (940, 3308)', x: 940, y: 3308 },
+  { id: 'pad_sm_1792_4184', code: 'S8', label: '#S8 后场侧翼小垫 (1792, 4184)', x: 1792, y: 4184 },
+  { id: 'pad_sm_0_4240', code: 'S9', label: '#S9 门前中心小垫 (0, 4240)', x: 0, y: 4240 },
+  { id: 'pad_big_side', code: 'B1', label: '#B1 中场大垫 (3584, 0)', x: 3584, y: 0 },
+  { id: 'pad_big_corner', code: 'B2', label: '#B2 底角大垫 (3072, 4096)', x: 3072, y: 4096 },
+  { id: 'ix_mid_2048_0', code: 'IX1', label: '#IX1 四垫交线点 (#S1-#B1 ∩ #S3上下) (2048, 0)', x: 2048, y: 0 },
+  { id: 'ko_diag', code: 'KO1', label: '#KO1 斜向开球车位 (2048, 2560)', x: 2048, y: 2560 },
+  { id: 'ko_back', code: 'KO2', label: '#KO2 后场偏置车位 (256, 3840)', x: 256, y: 3840 },
+  { id: 'ko_goalie', code: 'KO3', label: '#KO3 门前中轴车位 (0, 4608)', x: 0, y: 4608 },
+  { id: 'demo_inner', code: 'DM1', label: '#DM1 复活点内侧 (2304, 4608)', x: 2304, y: 4608 },
+  { id: 'demo_outer', code: 'DM2', label: '#DM2 复活点外侧 (2688, 4608)', x: 2688, y: 4608 },
+  { id: 'center', code: 'O', label: '场地中心原点 (0, 0)', x: 0, y: 0 },
+  { id: 'goal_center', code: 'GC', label: '球门线中心 (0, 5120)', x: 0, y: 5120 },
+  { id: 'goal_post_mesh', code: 'GP', label: '球门柱外沿 (896, 5120)', x: 896, y: 5120 },
+  { id: 'goal_post_flat', code: 'GF', label: '球门平地内柱 (804.95, 5128)', x: 804.95, y: 5127.96 }
 ];
