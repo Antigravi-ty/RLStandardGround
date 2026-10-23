@@ -36,15 +36,17 @@ export function exportProjectJson(project) {
   downloadBlob(blob, `${safeName}.json`);
 }
 
-export function exportSvgFile(project, mode = 'q1', includeReference = false) {
+export function exportSvgFile(project, mode = 'q1', includeReference = false, useColorPalettePreview = false) {
   const svgStr = buildArenaSvgString(project, {
     mode,
     includeReference,
-    useShaderPreview: false
+    useShaderPreview: false,
+    useColorPalettePreview
   });
   const blob = new Blob([svgStr], { type: 'image/svg+xml;charset=utf-8' });
   const suffix = mode === 'q1' ? 'quadrant_q1' : 'full_arena';
-  downloadBlob(blob, `rl_ground_${suffix}${includeReference ? '_with_ref' : ''}.svg`);
+  const colorTag = useColorPalettePreview ? '_10color' : '_9gray';
+  downloadBlob(blob, `rl_ground_${suffix}${colorTag}${includeReference ? '_with_ref' : ''}.svg`);
 }
 
 export async function exportRasterTexture(project, {
@@ -53,12 +55,14 @@ export async function exportRasterTexture(project, {
   height = 3000,
   format = 'image/webp', // 'image/webp' | 'image/png'
   useShaderPreview = false,
+  useColorPalettePreview = false,
   includeReference = false
 } = {}) {
   const svgStr = buildArenaSvgString(project, {
     mode,
     includeReference,
     useShaderPreview,
+    useColorPalettePreview,
     customPixelWidth: width,
     customPixelHeight: height
   });
@@ -78,7 +82,7 @@ export async function exportRasterTexture(project, {
 
       const ext = format === 'image/webp' ? 'webp' : 'png';
       const prefix = mode === 'q1' ? 'ground_q1' : 'ground_full';
-      const typeTag = useShaderPreview ? 'tinted' : 'grayscale';
+      const typeTag = useColorPalettePreview ? '10color' : (useShaderPreview ? 'tinted' : '9gray');
 
       canvas.toBlob((blob) => {
         if (!blob) {

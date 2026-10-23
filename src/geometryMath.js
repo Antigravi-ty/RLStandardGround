@@ -493,6 +493,68 @@ export function distanceToLayerQ1(layer, px, py) {
   return Infinity;
 }
 
+/**
+ * Resolves the effective grayscale value (0..255) and CSS color for a given layer or background level
+ * using the 10-Level Grayscale & Color Palette (Level 0 = Ground Base, Levels 1..9 = 9 Grayscale Tiers).
+ */
+export function resolveLayerGrayAndCss(layerOrLevel, opacity = 1.0, project = null, isShaderPreview = false) {
+  const palette = project?.colorPalettePreview;
+  const levels = Array.isArray(palette?.levels) ? palette.levels : null;
+  const usePaletteColors = Boolean(palette?.enabled) && !isShaderPreview;
+
+  let levelIdx = null;
+  let rawGray = 255;
+
+  if (typeof layerOrLevel === 'number') {
+    // Direct level index (e.g. 0 for ground base)
+    levelIdx = layerOrLevel;
+    const found = levels?.find(l => l.level === levelIdx);
+    rawGray = found ? found.gray : (levelIdx === 0 ? (project?.backgroundGray ?? 0) : Math.round((levelIdx / 9) * 255));
+  } else if (layerOrLevel && typeof layerOrLevel === 'object') {
+    if (layerOrLevel.grayLevel !== undefined && layerOrLevel.grayLevel !== null && layerOrLevel.grayLevel >= 0 && layerOrLevel.grayLevel <= 9) {
+      levelIdx = Number(layerOrLevel.grayLevel);
+      const found = levels?.find(l => l.level === levelIdx);
+      rawGray = found ? Number(found.gray) : Number(layerOrLevel.gray ?? 255);
+    } else {
+      rawGray = Number(layerOrLevel.gray ?? 255);
+      // Find closest level if palette color preview is enabled
+      if (levels && levels.length > 0) {
+        let bestL = levels[0];
+        let bestD = Math.abs(rawGray - bestL.gray);
+        for (const l of levels) {
+          const d = Math.abs(rawGray - l.gray);
+          if (d < bestD) {
+            bestD = d;
+            bestL = l;
+          }
+        }
+        levelIdx = bestL.level;
+      }
+    }
+  }
+
+  if (usePaletteColors && levels && levelIdx !== null) {
+    const found = levels.find(l => l.level === levelIdx);
+    if (found && found.color) {
+      const rgb = hexToRgb(found.color);
+      return {
+        gray: Math.max(0, Math.min(255, Math.round(rawGray))),
+        css: `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${opacity})`,
+        hex: found.color,
+        level: levelIdx
+      };
+    }
+  }
+
+  const shaderSim = isShaderPreview ? { ...project?.shaderPreview, enabled: true } : null;
+  return {
+    gray: Math.max(0, Math.min(255, Math.round(rawGray))),
+    css: grayToCss(rawGray, opacity, shaderSim),
+    hex: null,
+    level: levelIdx
+  };
+}
+
 export function grayToCss(grayVal, opacity = 1.0, shaderSim = null) {
   const g = Math.max(0, Math.min(255, Math.round(grayVal)));
   if (!shaderSim || !shaderSim.enabled) {

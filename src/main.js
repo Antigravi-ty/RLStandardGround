@@ -1,11 +1,12 @@
-import { DEFAULT_PROJECT, createNewLayerTemplate } from './defaultProject.js';
+import { DEFAULT_PROJECT, DEFAULT_GRAY_PALETTE_LEVELS, createNewLayerTemplate } from './defaultProject.js';
 import { Q1_NAMED_ANCHORS, ALL_HITBOX_UNION_BOUNDS } from './physicsData.js';
 import {
   solveThreePointArc,
   solveMonotoneFivePointSpline,
   trimLineSegment,
   findNearestAnchor,
-  distanceToLayerQ1
+  distanceToLayerQ1,
+  resolveLayerGrayAndCss
 } from './geometryMath.js';
 import { buildArenaSvgString, getScopeDimensions } from './svgRenderer.js';
 import {
@@ -16,7 +17,7 @@ import {
   exportRasterTexture
 } from './exporter.js';
 
-const STORAGE_KEY = 'rl_standard_ground_project_v3';
+const STORAGE_KEY = 'rl_standard_ground_project_v4';
 
 class GroundStudioApp {
   constructor() {
@@ -38,24 +39,50 @@ class GroundStudioApp {
     this.setupDragAndDrop();
   }
 
+  ensurePaletteLevels(proj) {
+    if (!proj.colorPalettePreview || !Array.isArray(proj.colorPalettePreview.levels) || proj.colorPalettePreview.levels.length < 10) {
+      proj.colorPalettePreview = {
+        enabled: proj.colorPalettePreview?.enabled ?? true,
+        levels: DEFAULT_GRAY_PALETTE_LEVELS.map(l => ({ ...l }))
+      };
+    }
+    // Ensure each layer has a valid grayLevel (1..9)
+    if (Array.isArray(proj.layers)) {
+      proj.layers.forEach((layer, idx) => {
+        if (layer.grayLevel === undefined || layer.grayLevel === null) {
+          layer.grayLevel = ((idx) % 9) + 1;
+        }
+        const lvlObj = proj.colorPalettePreview.levels.find(l => l.level === Number(layer.grayLevel));
+        if (lvlObj && layer.grayLevel >= 1 && layer.grayLevel <= 9) {
+          layer.gray = lvlObj.gray;
+        }
+      });
+    }
+    return proj;
+  }
+
   loadSavedProject() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) {
         const parsed = JSON.parse(raw);
         if (parsed && Array.isArray(parsed.layers)) {
-          return {
+          return this.ensurePaletteLevels({
             ...JSON.parse(JSON.stringify(DEFAULT_PROJECT)),
             ...parsed,
+            colorPalettePreview: {
+              ...JSON.parse(JSON.stringify(DEFAULT_PROJECT.colorPalettePreview)),
+              ...(parsed.colorPalettePreview || {})
+            },
             shaderPreview: { ...DEFAULT_PROJECT.shaderPreview, ...(parsed.shaderPreview || {}) },
             referenceOverlays: { ...DEFAULT_PROJECT.referenceOverlays, ...(parsed.referenceOverlays || {}) }
-          };
+          });
         }
       }
     } catch (e) {
       console.warn('Failed to load saved project from localStorage:', e);
     }
-    return JSON.parse(JSON.stringify(DEFAULT_PROJECT));
+    return this.ensurePaletteLevels(JSON.parse(JSON.stringify(DEFAULT_PROJECT)));
   }
 
   saveProject() {
@@ -105,9 +132,13 @@ class GroundStudioApp {
           <button class="btn" id="btnViewFull">仅看完整球场 (4x 对称)</button>
           <button class="btn" id="btnViewQ1">仅看四分之一 (Q1)</button>
           <span style="color:#475569">|</span>
+          <label class="checkbox-row" style="background:rgba(16,185,129,0.15);padding:4px 9px;border-radius:6px;border:1px solid #10b981">
+            <input type="checkbox" id="chkColorPalettePreview" />
+            <span>🌈 10级分层彩色预览 (L0地面 + L1~L9灰度层)</span>
+          </label>
           <label class="checkbox-row" style="background:#1e293b;padding:4px 9px;border-radius:6px;border:1px solid #334155">
             <input type="checkbox" id="chkShaderSim" />
-            <span>🎨 游戏 Shader 着色预览 (Ground + Line Tint)</span>
+            <span>🎨 游戏双色 Shader 预览</span>
           </label>
         </div>
 
@@ -121,15 +152,15 @@ class GroundStudioApp {
 
       <!-- Main 3-Column Workspace -->
       <div class="workspace">
-        <!-- Left Sidebar: 1. Actual Drawn Layer Stack, 2. Small Pad Safe Area, 3. Reference Guides & Canvas -->
+        <!-- Left Sidebar: 1. Actual Drawn Layer Stack, 2. 10-Level Palette, 3. Small Pad Safe Area, 4. Reference Guides & Canvas -->
         <aside class="sidebar">
           <!-- 1. Parametric Layer Stack (What is ACTUALLY drawn on the texture!) -->
           <div class="panel-section">
             <div class="panel-title">
-              <span>1. ✏️ 实际绘制的贴图图层 (导出内容)</span>
+              <span>1. ✏️ 实际绘制的贴图图层 (${this.project.layers.length} 层)</span>
             </div>
             <div class="hint-box">
-              这里才是<b>真正画在贴图上的白色线条</b>。直接在画布上点击线条也可自动选中对应图层；每层右侧 📋 可单独复制该层 JSON。
+              每个图层可绑定到 <b>L1 ~ L9 九个灰度层级</b>（连同 L0 地面空余部分共 <b>10 个颜色层级</b>）。每层可直接切换所属层级或 📋 复制 JSON。
             </div>
             <div class="field-inline">
               <select id="selNewLayerType" style="flex:1">
@@ -147,10 +178,22 @@ class GroundStudioApp {
             <div class="layer-list" id="layerListContainer"></div>
           </div>
 
-          <!-- 2. Global Small Boost Pad Safe Area Config -->
+          <!-- 2. 10-Level Grayscale & Color Palette Config -->
           <div class="panel-section">
             <div class="panel-title">
-              <span>2. 🛡️ Small Boost Pad Safe Area (截断保护区)</span>
+              <span>2. 🌈 10级灰度与颜色预览表 (L0地面 + L1~L9)</span>
+              <button class="btn" id="btnResetPalette" style="padding:2px 6px;font-size:10px" title="恢复默认 10 级等分灰度与配色">重置配色</button>
+            </div>
+            <div class="hint-box" style="border-left-color:#10b981">
+              共 <b>10 个层级</b>：<b>L0</b> 为地面空余基底 (Gray=0)，<b>L1 ~ L9</b> 为 9 个递增灰度等级。勾选上方「10级分层彩色预览」即可用 10 种高对比度颜色直观区分各层！
+            </div>
+            <div id="paletteLevelsContainer" style="display:flex;flex-direction:column;gap:5px"></div>
+          </div>
+
+          <!-- 3. Global Small Boost Pad Safe Area Config -->
+          <div class="panel-section">
+            <div class="panel-title">
+              <span>3. 🛡️ Small Boost Pad Safe Area (截断保护区)</span>
             </div>
             <div class="field-row">
               <div class="field-label">
@@ -168,10 +211,10 @@ class GroundStudioApp {
             </label>
           </div>
 
-          <!-- 3. Physical Reference Overlays (Non-Exported Guides) -->
+          <!-- 4. Physical Reference Overlays (Non-Exported Guides) -->
           <div class="panel-section">
             <div class="panel-title">
-              <span>3. 📐 物理判定参考层 (仅对位，不导出)</span>
+              <span>4. 📐 物理判定参考层 (仅对位，不导出)</span>
             </div>
             <label class="checkbox-row"><input type="checkbox" id="chkRefPadNumbers" /> <span>🔢 显示 Boost Pad 与车位编号 (#B1~#S9, #KO1~#DM2, #IX1)</span></label>
             <label class="checkbox-row"><input type="checkbox" id="chkRefFlatFloor" /> <span>🟢 Z=0 纯平地面边界 (绿色虚线)</span></label>
@@ -185,10 +228,10 @@ class GroundStudioApp {
             </div>
           </div>
 
-          <!-- 4. Canvas Scope & Base Grayscale -->
+          <!-- 5. Canvas Scope & Base Grayscale -->
           <div class="panel-section">
             <div class="panel-title">
-              <span>4. 画布范围与基底灰度</span>
+              <span>5. 画布范围与基底设置</span>
             </div>
             <div class="field-row">
               <div class="field-label"><span>Q1 贴图物理范围</span></div>
@@ -200,7 +243,7 @@ class GroundStudioApp {
             </div>
             <div class="field-row">
               <div class="field-label">
-                <span>背景基底灰度 (Background Gray)</span>
+                <span>背景基底灰度 (L0 Ground Gray)</span>
                 <span class="field-val" id="valBgGray">0</span>
               </div>
               <input type="range" id="rngBgGray" min="0" max="255" step="1" value="0" />
@@ -329,6 +372,10 @@ class GroundStudioApp {
               <input type="checkbox" id="chkExportWithRef" />
               <span>导出时包含物理参考线 (默认不勾选，仅导纯净贴图)</span>
             </label>
+            <label class="checkbox-row" style="color:#6ee7b7">
+              <input type="checkbox" id="chkExportColorMode" />
+              <span>🌈 导出 10 级彩色预览图 (不勾选则导出 9 级灰度贴图)</span>
+            </label>
             <div style="display:flex;flex-direction:column;gap:7px;margin-top:4px">
               <button class="btn btn-emerald" id="btnExportRaster" style="justify-content:center;padding:9px;font-size:13px;font-weight:700">
                 🖼️ 导出光栅贴图 (WebP / PNG)
@@ -357,6 +404,38 @@ class GroundStudioApp {
 
     document.getElementById('chkMagneticSnap').onchange = (e) => {
       this.magneticSnapEnabled = e.target.checked;
+    };
+
+    // 10-Level Color Palette Preview Toggle
+    const chkPalette = document.getElementById('chkColorPalettePreview');
+    chkPalette.checked = Boolean(this.project.colorPalettePreview?.enabled);
+    chkPalette.onchange = (e) => {
+      if (!this.project.colorPalettePreview) {
+        this.project.colorPalettePreview = { enabled: true, levels: DEFAULT_GRAY_PALETTE_LEVELS.map(l => ({ ...l })) };
+      }
+      this.project.colorPalettePreview.enabled = e.target.checked;
+      if (e.target.checked && this.project.shaderPreview.enabled) {
+        this.project.shaderPreview.enabled = false;
+        document.getElementById('chkShaderSim').checked = false;
+        document.getElementById('shaderControlsBox').style.display = 'none';
+      }
+      this.renderLayerList();
+      this.renderInspector();
+      this.saveAndRenderCanvas();
+    };
+
+    document.getElementById('btnResetPalette').onclick = () => {
+      this.project.colorPalettePreview = {
+        enabled: true,
+        levels: DEFAULT_GRAY_PALETTE_LEVELS.map(l => ({ ...l }))
+      };
+      chkPalette.checked = true;
+      this.project.backgroundGray = 0;
+      this.project.layers.forEach((layer) => {
+        const lvl = this.project.colorPalettePreview.levels.find(x => x.level === Number(layer.grayLevel));
+        if (lvl) layer.gray = lvl.gray;
+      });
+      this.syncAll();
     };
 
     // Single Layer JSON Copy & Paste
@@ -393,6 +472,7 @@ class GroundStudioApp {
         const parsed = JSON.parse(txtJson.value);
         if (parsed && parsed.type) {
           parsed.id = `layer_${parsed.type}_${Date.now()}`;
+          if (parsed.grayLevel === undefined) parsed.grayLevel = 9;
           this.project.layers.push(parsed);
           this.selectedLayerId = parsed.id;
           this.syncAll();
@@ -422,6 +502,10 @@ class GroundStudioApp {
     chkShader.checked = Boolean(this.project.shaderPreview.enabled);
     chkShader.onchange = (e) => {
       this.project.shaderPreview.enabled = e.target.checked;
+      if (e.target.checked && this.project.colorPalettePreview) {
+        this.project.colorPalettePreview.enabled = false;
+        chkPalette.checked = false;
+      }
       document.getElementById('shaderControlsBox').style.display = e.target.checked ? 'block' : 'none';
       this.saveAndRenderCanvas();
     };
@@ -453,8 +537,13 @@ class GroundStudioApp {
     rngBg.value = this.project.backgroundGray ?? 0;
     document.getElementById('valBgGray').textContent = rngBg.value;
     rngBg.oninput = (e) => {
-      this.project.backgroundGray = parseInt(e.target.value, 10);
-      document.getElementById('valBgGray').textContent = e.target.value;
+      const gVal = parseInt(e.target.value, 10) || 0;
+      this.project.backgroundGray = gVal;
+      if (this.project.colorPalettePreview?.levels?.[0]) {
+        this.project.colorPalettePreview.levels[0].gray = gVal;
+      }
+      document.getElementById('valBgGray').textContent = gVal;
+      this.renderPaletteLevels();
       this.saveAndRenderCanvas();
     };
 
@@ -482,6 +571,8 @@ class GroundStudioApp {
     document.getElementById('btnAddLayer').onclick = () => {
       const type = document.getElementById('selNewLayerType').value;
       const newLayer = createNewLayerTemplate(type, this.project.layers.length + 1);
+      const lvlObj = this.project.colorPalettePreview?.levels?.find(l => l.level === Number(newLayer.grayLevel));
+      if (lvlObj) newLayer.gray = lvlObj.gray;
       this.project.layers.push(newLayer);
       this.selectedLayerId = newLayer.id;
       this.syncAll();
@@ -530,12 +621,13 @@ class GroundStudioApp {
 
     document.getElementById('btnExportJson').onclick = () => exportProjectJson(this.project);
     document.getElementById('btnResetDefault').onclick = () => {
-      this.project = JSON.parse(JSON.stringify(DEFAULT_PROJECT));
+      this.project = this.ensurePaletteLevels(JSON.parse(JSON.stringify(DEFAULT_PROJECT)));
       this.selectedLayerId = this.project.layers[0]?.id || null;
       const safeVal = this.project.smallPadSafeExpand ?? 60;
       document.getElementById('rngSafeExpand').value = safeVal;
       document.getElementById('numSafeExpand').value = safeVal;
       document.getElementById('valSafeExpand').textContent = `+${safeVal} UU (总 R=${144 + safeVal})`;
+      document.getElementById('chkColorPalettePreview').checked = Boolean(this.project.colorPalettePreview?.enabled);
       this.syncAll();
     };
 
@@ -552,21 +644,33 @@ class GroundStudioApp {
       const mode = document.getElementById('selExportMode').value;
       const format = document.getElementById('selExportFormat').value;
       const includeReference = document.getElementById('chkExportWithRef').checked;
+      const useColorPalettePreview = document.getElementById('chkExportColorMode').checked;
       exportRasterTexture(this.project, {
         mode,
         width: w,
         height: h,
         format,
         useShaderPreview: Boolean(this.project.shaderPreview.enabled),
+        useColorPalettePreview,
         includeReference
       });
     };
 
     document.getElementById('btnExportSvgQ1').onclick = () => {
-      exportSvgFile(this.project, 'q1', document.getElementById('chkExportWithRef').checked);
+      exportSvgFile(
+        this.project,
+        'q1',
+        document.getElementById('chkExportWithRef').checked,
+        document.getElementById('chkExportColorMode').checked
+      );
     };
     document.getElementById('btnExportSvgFull').onclick = () => {
-      exportSvgFile(this.project, 'full_mirror', document.getElementById('chkExportWithRef').checked);
+      exportSvgFile(
+        this.project,
+        'full_mirror',
+        document.getElementById('chkExportWithRef').checked,
+        document.getElementById('chkExportColorMode').checked
+      );
     };
 
     this.syncExportPresetInputs();
@@ -593,14 +697,82 @@ class GroundStudioApp {
 
   syncAll() {
     this.updateViewModeUI();
+    this.renderPaletteLevels();
     this.renderLayerList();
     this.renderInspector();
     this.saveAndRenderCanvas();
   }
 
+  renderPaletteLevels() {
+    const container = document.getElementById('paletteLevelsContainer');
+    if (!container) return;
+    this.ensurePaletteLevels(this.project);
+    const levels = this.project.colorPalettePreview.levels;
+
+    container.innerHTML = '';
+    levels.forEach((lvlObj) => {
+      const boundCount = lvlObj.level === 0
+        ? '地面基底'
+        : `${this.project.layers.filter(l => Number(l.grayLevel) === lvlObj.level).length} 图层`;
+
+      const row = document.createElement('div');
+      row.style.cssText = 'display:grid;grid-template-columns:36px 1fr 56px 32px 52px;align-items:center;gap:6px;background:#0f172a;border:1px solid #334155;border-radius:5px;padding:4px 6px;font-size:11px';
+
+      const grayHex = lvlObj.gray.toString(16).padStart(2, '0');
+      const graySwatch = `#${grayHex}${grayHex}${grayHex}`;
+
+      row.innerHTML = `
+        <span style="font-family:monospace;font-weight:700;color:${lvlObj.color};display:flex;align-items:center;gap:3px">
+          <span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:${graySwatch};border:1px solid #64748b" title="实际灰度 RGB(${lvlObj.gray},${lvlObj.gray},${lvlObj.gray})"></span>
+          L${lvlObj.level}
+        </span>
+        <input type="text" class="inp-lvl-name" value="${lvlObj.name}" style="padding:2px 5px;font-size:11px" />
+        <input type="number" class="inp-lvl-gray" value="${lvlObj.gray}" min="0" max="255" step="1" title="该层级对应的灰度值 (0..255)" style="padding:2px 4px;font-size:11px;text-align:right" />
+        <input type="color" class="inp-lvl-color" value="${lvlObj.color}" title="该层级的预览颜色" style="width:28px;height:22px;padding:0" />
+        <span style="font-family:monospace;font-size:10px;color:#94a3b8;text-align:right">${boundCount}</span>
+      `;
+
+      row.querySelector('.inp-lvl-name').oninput = (e) => {
+        lvlObj.name = e.target.value;
+        this.renderInspector();
+        this.saveProject();
+      };
+
+      row.querySelector('.inp-lvl-gray').oninput = (e) => {
+        const g = Math.max(0, Math.min(255, parseInt(e.target.value, 10) || 0));
+        lvlObj.gray = g;
+        if (lvlObj.level === 0) {
+          this.project.backgroundGray = g;
+          const rngBg = document.getElementById('rngBgGray');
+          const valBg = document.getElementById('valBgGray');
+          if (rngBg) rngBg.value = g;
+          if (valBg) valBg.textContent = g;
+        } else {
+          this.project.layers.forEach((l) => {
+            if (Number(l.grayLevel) === lvlObj.level) {
+              l.gray = g;
+            }
+          });
+        }
+        this.renderInspector();
+        this.saveAndRenderCanvas();
+      };
+
+      row.querySelector('.inp-lvl-color').oninput = (e) => {
+        lvlObj.color = e.target.value;
+        this.renderLayerList();
+        this.renderInspector();
+        this.saveAndRenderCanvas();
+      };
+
+      container.appendChild(row);
+    });
+  }
+
   renderLayerList() {
     const container = document.getElementById('layerListContainer');
     container.innerHTML = '';
+    const levels = this.project.colorPalettePreview?.levels || DEFAULT_GRAY_PALETTE_LEVELS;
 
     this.project.layers.forEach((layer, idx) => {
       const div = document.createElement('div');
@@ -617,11 +789,19 @@ class GroundStudioApp {
         turf_stripes: '条纹'
       };
 
+      const curLvl = Number(layer.grayLevel ?? 9);
+      const lvlObj = levels.find(l => l.level === curLvl) || levels[9];
+      const swatchColor = lvlObj ? lvlObj.color : '#ffffff';
+
       div.innerHTML = `
         <div class="layer-left">
           <input type="checkbox" class="layer-vis-chk" ${layer.visible ? 'checked' : ''} title="显示/隐藏该图层" />
+          <span style="display:inline-block;width:11px;height:11px;border-radius:3px;background:${swatchColor};border:1px solid rgba(255,255,255,0.45);flex-shrink:0" title="当前绑定层级 L${curLvl} (Gray=${lvlObj?.gray ?? layer.gray})"></span>
+          <select class="layer-lvl-select" title="快速切换该图层绑定的灰度/颜色层级 (L1~L9)" style="width:52px;padding:1px 3px;font-size:10px;font-family:monospace;background:#0b1120;color:${swatchColor};border:1px solid #334155;border-radius:4px;flex-shrink:0">
+            ${levels.filter(l => l.level >= 1).map(l => `<option value="${l.level}" ${l.level === curLvl ? 'selected' : ''}>L${l.level}</option>`).join('')}
+          </select>
           <span class="layer-type-badge">${badgeMap[layer.type] || layer.type}</span>
-          <span class="layer-name">${layer.name}</span>
+          <span class="layer-name" title="${layer.name}">${layer.name}</span>
         </div>
         <div class="layer-actions">
           <button class="icon-btn btn-copy-item" title="复制本层 JSON 参数">📋</button>
@@ -644,11 +824,28 @@ class GroundStudioApp {
       };
 
       div.onclick = (e) => {
-        if (e.target.classList.contains('layer-vis-chk') || e.target.classList.contains('icon-btn')) return;
+        if (
+          e.target.classList.contains('layer-vis-chk') ||
+          e.target.classList.contains('layer-lvl-select') ||
+          e.target.classList.contains('icon-btn')
+        ) return;
         this.selectedLayerId = layer.id;
         this.pickTarget = null;
         this.renderLayerList();
         this.renderInspector();
+        this.saveAndRenderCanvas();
+      };
+
+      const selLvl = div.querySelector('.layer-lvl-select');
+      selLvl.onchange = (e) => {
+        e.stopPropagation();
+        const newLvl = parseInt(e.target.value, 10) || 1;
+        layer.grayLevel = newLvl;
+        const found = levels.find(l => l.level === newLvl);
+        if (found) layer.gray = found.gray;
+        this.renderPaletteLevels();
+        this.renderLayerList();
+        if (this.selectedLayerId === layer.id) this.renderInspector();
         this.saveAndRenderCanvas();
       };
 
@@ -701,10 +898,36 @@ class GroundStudioApp {
       txtJson.value = JSON.stringify(layer, null, 2);
     }
 
+    const levels = this.project.colorPalettePreview?.levels || DEFAULT_GRAY_PALETTE_LEVELS;
+    const curLvl = Number(layer.grayLevel ?? 9);
+    const curLvlObj = levels.find(l => l.level === curLvl) || levels[9];
+
     let html = `
       <div class="field-row">
         <div class="field-label"><span>图层名称</span></div>
         <input type="text" id="inspName" value="${layer.name}" />
+      </div>
+
+      <!-- 9-Level Grayscale & 10-Color Palette Binding Selector -->
+      <div style="background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.4);padding:8px;border-radius:6px;display:flex;flex-direction:column;gap:6px">
+        <div class="field-label" style="color:#6ee7b7;font-weight:700">
+          <span>🎨 绑定灰度与颜色层级 (L1~L9, 连同 L0 地面共 10 级)</span>
+          <span style="font-family:monospace;color:${curLvlObj.color}">L${curLvl} · Gray ${curLvlObj.gray}</span>
+        </div>
+        <div class="field-inline">
+          <span style="display:inline-block;width:22px;height:22px;border-radius:4px;background:${curLvlObj.color};border:1px solid #fff;flex-shrink:0" title="当前层级预览色 ${curLvlObj.color}"></span>
+          <select id="selInspGrayLevel" style="flex:1">
+            ${levels.filter(l => l.level >= 1).map(l => `<option value="${l.level}" ${l.level === curLvl ? 'selected' : ''}>L${l.level} — ${l.name} (Gray=${l.gray})</option>`).join('')}
+          </select>
+          <input type="color" id="colInspLevelColor" value="${curLvlObj.color}" title="直接修改当前绑定层级 L${curLvl} 的预览颜色" style="width:32px;height:26px" />
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(9, 1fr);gap:3px">
+          ${levels.filter(l => l.level >= 1).map(l => `
+            <button class="btn-quick-lvl" data-lvl="${l.level}" title="点击绑定到 L${l.level} (${l.name}, Gray=${l.gray})" style="background:${l.level === curLvl ? l.color : '#0f172a'};color:${l.level === curLvl ? '#000' : l.color};border:1px solid ${l.color};border-radius:4px;padding:3px 0;font-size:10px;font-family:monospace;font-weight:700;cursor:pointer">
+              L${l.level}
+            </button>
+          `).join('')}
+        </div>
       </div>
     `;
 
@@ -1136,6 +1359,43 @@ class GroundStudioApp {
     bindVal('numTrimStart', 'trimStart', true, layer.type === 'rect_or_line');
     bindVal('numTrimEnd', 'trimEnd', true, layer.type === 'rect_or_line');
 
+    // Bind 9-Level Grayscale & 10-Color Palette controls in Inspector
+    const levels = this.project.colorPalettePreview?.levels || DEFAULT_GRAY_PALETTE_LEVELS;
+    const applyLayerLevel = (newLvl) => {
+      const lv = Math.max(1, Math.min(9, parseInt(newLvl, 10) || 1));
+      layer.grayLevel = lv;
+      const found = levels.find(l => l.level === lv);
+      if (found) layer.gray = found.gray;
+      syncJsonBox();
+      this.renderPaletteLevels();
+      this.renderLayerList();
+      this.renderInspector();
+      this.saveAndRenderCanvas();
+    };
+
+    const selInspLvl = document.getElementById('selInspGrayLevel');
+    if (selInspLvl) {
+      selInspLvl.onchange = (e) => applyLayerLevel(e.target.value);
+    }
+
+    document.querySelectorAll('.btn-quick-lvl').forEach((btn) => {
+      btn.onclick = () => applyLayerLevel(btn.getAttribute('data-lvl'));
+    });
+
+    const colInspLvl = document.getElementById('colInspLevelColor');
+    if (colInspLvl) {
+      colInspLvl.oninput = (e) => {
+        const curLv = Number(layer.grayLevel ?? 9);
+        const found = levels.find(l => l.level === curLv);
+        if (found) {
+          found.color = e.target.value;
+          this.renderPaletteLevels();
+          this.renderLayerList();
+          this.saveAndRenderCanvas();
+        }
+      };
+    }
+
     const chkCutSafe = document.getElementById('chkCutBySafeArea');
     if (chkCutSafe) {
       chkCutSafe.onchange = (e) => {
@@ -1174,6 +1434,13 @@ class GroundStudioApp {
         rng.value = v;
         num.value = v;
         if (lbl) lbl.textContent = customFmt ? customFmt(v) : `${v}${unit}`;
+        if (prop === 'gray' && layer.grayLevel >= 1 && layer.grayLevel <= 9) {
+          const found = levels.find(l => l.level === Number(layer.grayLevel));
+          if (found) {
+            found.gray = Math.max(0, Math.min(255, Math.round(v)));
+            this.renderPaletteLevels();
+          }
+        }
         syncJsonBox();
         if (rerender) this.renderInspector();
         this.saveAndRenderCanvas();
@@ -1475,13 +1742,18 @@ class GroundStudioApp {
         try {
           const parsed = JSON.parse(content);
           if (parsed && Array.isArray(parsed.layers)) {
-            this.project = {
+            this.project = this.ensurePaletteLevels({
               ...JSON.parse(JSON.stringify(DEFAULT_PROJECT)),
               ...parsed,
+              colorPalettePreview: {
+                ...JSON.parse(JSON.stringify(DEFAULT_PROJECT.colorPalettePreview)),
+                ...(parsed.colorPalettePreview || {})
+              },
               shaderPreview: { ...DEFAULT_PROJECT.shaderPreview, ...(parsed.shaderPreview || {}) },
               referenceOverlays: { ...DEFAULT_PROJECT.referenceOverlays, ...(parsed.referenceOverlays || {}) }
-            };
+            });
             this.selectedLayerId = this.project.layers[0]?.id || null;
+            document.getElementById('chkColorPalettePreview').checked = Boolean(this.project.colorPalettePreview?.enabled);
             this.syncAll();
           }
         } catch (err) {

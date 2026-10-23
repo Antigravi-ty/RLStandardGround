@@ -18,7 +18,8 @@ import {
   solveMonotoneFivePointSpline,
   trimLineSegment,
   trimPolylineByArcLength,
-  grayToCss
+  grayToCss,
+  resolveLayerGrayAndCss
 } from './geometryMath.js';
 
 export function getScopeDimensions(canvasScope) {
@@ -92,7 +93,7 @@ function buildFourCornersPathD(x0, x1, y0, y1, cornerLen) {
  * Renders a single parametric layer in Q1 space [0..4096, 0..6000].
  * Returns { defsHtml, bodyHtml } so clipPaths stay in <defs>.
  */
-export function renderParametricLayerQ1(layer, index, shaderSim, isInteractiveSelected = false) {
+export function renderParametricLayerQ1(layer, index, shaderSim, isInteractiveSelected = false, project = null) {
   if (!layer || !layer.visible) return { defsHtml: '', bodyHtml: '' };
 
   const clipId = `clip_${layer.id}_${index}`;
@@ -106,9 +107,15 @@ export function renderParametricLayerQ1(layer, index, shaderSim, isInteractiveSe
   let defsHtml = `<clipPath id="${clipId}"><rect x="${cxMin}" y="${cyMin}" width="${cw}" height="${ch}" /></clipPath>`;
   let innerHtml = '';
 
-  const strokeColor = grayToCss(layer.gray ?? 255, layer.opacity ?? 1.0, shaderSim);
+  const resolvedStroke = project
+    ? resolveLayerGrayAndCss(layer, layer.opacity ?? 1.0, project, Boolean(shaderSim?.enabled))
+    : { css: grayToCss(layer.gray ?? 255, layer.opacity ?? 1.0, shaderSim) };
+  const strokeColor = resolvedStroke.css;
+
   const fillColor = (layer.fillGray !== undefined && layer.fillGray >= 0)
-    ? grayToCss(layer.fillGray, layer.opacity ?? 1.0, shaderSim)
+    ? (project
+        ? resolveLayerGrayAndCss({ gray: layer.fillGray, grayLevel: layer.fillGrayLevel }, layer.opacity ?? 1.0, project, Boolean(shaderSim?.enabled)).css
+        : grayToCss(layer.fillGray, layer.opacity ?? 1.0, shaderSim))
     : 'none';
 
   const dashAttr = (layer.dashLength > 0 && layer.gapLength > 0)
@@ -123,7 +130,7 @@ export function renderParametricLayerQ1(layer, index, shaderSim, isInteractiveSe
     const span = Math.max(32, Number(layer.stripeSpan) || 512);
     const duty = Math.max(0.05, Math.min(0.95, Number(layer.dutyCycle) || 0.5));
     const offset = Number(layer.offset) || 0;
-    const stripeColor = grayToCss(layer.gray ?? 16, layer.opacity ?? 1.0, shaderSim);
+    const stripeColor = strokeColor;
 
     let turfClipAttr = '';
     if (layer.clipToFlatFloor) {
@@ -538,6 +545,7 @@ export function buildArenaSvgString(project, {
   mode = 'full_mirror', // 'q1' | 'full_mirror'
   includeReference = true,
   useShaderPreview = false,
+  useColorPalettePreview = null,
   activeLayerId = null,
   hoveredLayerId = null,
   snappedAnchor = null,
@@ -546,17 +554,31 @@ export function buildArenaSvgString(project, {
 } = {}) {
   const { w: scopeW, h: scopeH } = getScopeDimensions(project.canvasScope);
   const shaderSim = useShaderPreview ? { ...project.shaderPreview, enabled: true } : null;
-  const bgColor = grayToCss(project.backgroundGray ?? 0, 1.0, shaderSim);
 
-  let allDefs = buildSmallPadSafeAreaMaskDef(project);
+  // Allow overriding colorPalettePreview.enabled (e.g. when exporting pure grayscale vs color preview)
+  const effectiveProject = useColorPalettePreview !== null
+    ? {
+        ...project,
+        colorPalettePreview: {
+          ...(project.colorPalettePreview || {}),
+          enabled: Boolean(useColorPalettePreview)
+        }
+      }
+    : project;
+
+  const bgResolved = resolveLayerGrayAndCss(0, 1.0, effectiveProject, useShaderPreview);
+  const bgColor = bgResolved.css;
+
+  let allDefs = buildSmallPadSafeAreaMaskDef(effectiveProject);
   let allBodies = '';
 
-  project.layers.forEach((layer, idx) => {
+  effectiveProject.layers.forEach((layer, idx) => {
     const { defsHtml, bodyHtml } = renderParametricLayerQ1(
       layer,
       idx,
       shaderSim,
-      layer.id === activeLayerId
+      layer.id === activeLayerId,
+      effectiveProject
     );
     allDefs += defsHtml;
     allBodies += bodyHtml;
