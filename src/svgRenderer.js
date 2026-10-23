@@ -46,6 +46,22 @@ function pointsToPathD(pts, closeToOrigin = false) {
 }
 
 /**
+ * Builds the global SVG <mask> that cuts out Small Boost Pad Safe Areas (R = 144 + smallPadSafeExpand).
+ */
+export function buildSmallPadSafeAreaMaskDef(project) {
+  const expand = Math.max(0, Number(project.smallPadSafeExpand ?? 60));
+  const safeR = ARENA_CONSTANTS.PAD_CYL_RAD_SMALL + expand;
+  const circles = Q1_BOOST_PADS_SMALL.map(
+    (p) => `<circle cx="${p.x}" cy="${p.y}" r="${safeR.toFixed(2)}" fill="black" />`
+  ).join('');
+
+  return `<mask id="mask_small_pad_safe_q1" maskUnits="userSpaceOnUse" x="-600" y="-600" width="5200" height="7200">
+    <rect x="-600" y="-600" width="5200" height="7200" fill="white" />
+    ${circles}
+  </mask>`;
+}
+
+/**
  * Renders a single parametric layer in Q1 space [0..4096, 0..6000].
  * Returns { defsHtml, bodyHtml } so clipPaths stay in <defs>.
  */
@@ -107,14 +123,17 @@ export function renderParametricLayerQ1(layer, index, shaderSim, isInteractiveSe
     innerHtml = `<g ${turfClipAttr}>${stripes}</g>`;
   } else if (layer.type === 'contour_offset') {
     const basePts = getBaseContourPoints(layer.baseContour);
-    const offsetPts = offsetQ1Contour(basePts, Number(layer.insetDist) || 0);
+    const sw = Number(layer.strokeWidth) || 0;
+    const hugOffset = layer.hugInnerEdge ? sw * 0.5 : 0;
+    const totalInset = hugOffset + (Number(layer.insetDist) || 0);
+    const offsetPts = offsetQ1Contour(basePts, totalInset);
     if (layer.fillGray !== undefined && layer.fillGray >= 0) {
       const fillD = pointsToPathD(offsetPts, true);
       innerHtml += `<path d="${fillD}" fill="${fillColor}" stroke="none" />`;
     }
     const strokeD = pointsToPathD(offsetPts, false);
-    if (Number(layer.strokeWidth) > 0) {
-      innerHtml += `<path d="${strokeD}" fill="none" stroke="${strokeColor}" stroke-width="${layer.strokeWidth}" ${dashAttr} ${capJoinAttr} />`;
+    if (sw > 0) {
+      innerHtml += `<path d="${strokeD}" fill="none" stroke="${strokeColor}" stroke-width="${sw}" ${dashAttr} ${capJoinAttr} />`;
     }
   } else if (layer.type === 'circle_arc') {
     const cx = Number(layer.cx) || 0;
@@ -144,8 +163,6 @@ export function renderParametricLayerQ1(layer, index, shaderSim, isInteractiveSe
   } else if (layer.type === 'rect_or_line') {
     const sw = Number(layer.strokeWidth) || 0;
     if (layer.subMode === 'hline_y0') {
-      // Drawn along Y=0 symmetry axis: since Q1 mirrors across Y=0, a line centered at Y=0 with total width `sw`
-      // needs `sw` stroke width at y=0 (half of it >=0, half mirrored!).
       const x1 = Number(layer.x1) || 0;
       const x2 = Number(layer.x2) || 3840;
       const y = Number(layer.y1) || 0;
@@ -158,7 +175,6 @@ export function renderParametricLayerQ1(layer, index, shaderSim, isInteractiveSe
     } else if (layer.subMode === 'custom_segment') {
       innerHtml += `<line x1="${layer.x1}" y1="${layer.y1}" x2="${layer.x2}" y2="${layer.y2}" stroke="${strokeColor}" stroke-width="${sw}" ${dashAttr} ${capJoinAttr} />`;
     } else {
-      // 'rect_box': If x1 === 0 (on symmetry axis X=0), draw only the top/right/bottom edges in Q1 so there's no vertical seam line at X=0!
       const rx1 = Math.min(Number(layer.x1) || 0, Number(layer.x2) || 1000);
       const rx2 = Math.max(Number(layer.x1) || 0, Number(layer.x2) || 1000);
       const ry1 = Math.min(Number(layer.y1) || 0, Number(layer.y2) || 1000);
@@ -171,7 +187,6 @@ export function renderParametricLayerQ1(layer, index, shaderSim, isInteractiveSe
       }
       if (sw > 0) {
         if (rx1 <= 0.01) {
-          // Open at X=0 symmetry axis so mirroring across X=0 creates a seamless centered box!
           const d = `M 0,${ry1} L ${rx2},${ry1} L ${rx2},${ry2} L 0,${ry2}`;
           innerHtml += `<path d="${d}" fill="none" stroke="${strokeColor}" stroke-width="${sw}" ${dashAttr} ${capJoinAttr} />`;
         } else {
@@ -184,24 +199,30 @@ export function renderParametricLayerQ1(layer, index, shaderSim, isInteractiveSe
     if (layer.targetPads === 'big' || layer.targetPads === 'both') pads.push(...Q1_BOOST_PADS_BIG);
     if (layer.targetPads === 'small' || layer.targetPads === 'both') pads.push(...Q1_BOOST_PADS_SMALL);
 
-    const r = Math.max(2, Number(layer.radius) || 80);
-    const sw = Number(layer.strokeWidth) || 0;
-    const outerR = Number(layer.outerDashRadius) || 0;
-    const outerSw = Number(layer.outerDashWidth) || 0;
-    const outerColor = grayToCss(layer.outerDashGray ?? 160, layer.opacity ?? 1.0, shaderSim);
-    const outerDash = (layer.outerDashLength > 0 && layer.outerGapLength > 0)
-      ? `stroke-dasharray="${layer.outerDashLength},${layer.outerGapLength}"`
-      : '';
+    const isInwardMode = layer.ringMode !== 'custom_radius';
+    const inwardW = Math.max(1, Number(layer.inwardWidth ?? layer.strokeWidth ?? 20));
+    const insetFromEdge = Number(layer.insetFromPickup ?? 0);
+
+    const customR = Math.max(2, Number(layer.radius) || 80);
+    const customSw = Number(layer.strokeWidth) || 0;
 
     for (const p of pads) {
-      if (layer.fillGray !== undefined && layer.fillGray >= 0) {
-        innerHtml += `<circle cx="${p.x}" cy="${p.y}" r="${r}" fill="${fillColor}" stroke="none" />`;
-      }
-      if (sw > 0) {
-        innerHtml += `<circle cx="${p.x}" cy="${p.y}" r="${r}" fill="none" stroke="${strokeColor}" stroke-width="${sw}" ${dashAttr} />`;
-      }
-      if (outerR > 0 && outerSw > 0) {
-        innerHtml += `<circle cx="${p.x}" cy="${p.y}" r="${outerR}" fill="none" stroke="${outerColor}" stroke-width="${outerSw}" ${outerDash} />`;
+      if (isInwardMode) {
+        const pickupR = p.isBig ? ARENA_CONSTANTS.PAD_CYL_RAD_BIG : ARENA_CONSTANTS.PAD_CYL_RAD_SMALL;
+        const outerEdgeR = Math.max(2, pickupR - insetFromEdge);
+        const strokeCenterR = Math.max(1, outerEdgeR - inwardW * 0.5);
+        const innerEdgeR = Math.max(0, outerEdgeR - inwardW);
+        if (layer.fillGray !== undefined && layer.fillGray >= 0 && innerEdgeR > 0) {
+          innerHtml += `<circle cx="${p.x}" cy="${p.y}" r="${innerEdgeR.toFixed(2)}" fill="${fillColor}" stroke="none" />`;
+        }
+        innerHtml += `<circle cx="${p.x}" cy="${p.y}" r="${strokeCenterR.toFixed(2)}" fill="none" stroke="${strokeColor}" stroke-width="${inwardW}" ${dashAttr} />`;
+      } else {
+        if (layer.fillGray !== undefined && layer.fillGray >= 0) {
+          innerHtml += `<circle cx="${p.x}" cy="${p.y}" r="${customR}" fill="${fillColor}" stroke="none" />`;
+        }
+        if (customSw > 0) {
+          innerHtml += `<circle cx="${p.x}" cy="${p.y}" r="${customR}" fill="none" stroke="${strokeColor}" stroke-width="${customSw}" ${dashAttr} />`;
+        }
       }
     }
   } else if (layer.type === 'spawn_marker_group') {
@@ -224,7 +245,6 @@ export function renderParametricLayerQ1(layer, index, shaderSim, isInteractiveSe
           <line x1="0" y1="${-arm}" x2="0" y2="${arm}" stroke="${strokeColor}" stroke-width="${sw}" />
         </g>`;
       } else {
-        // 'hitbox_outline': Exact car hitbox aligned via hitboxPosOffset.x!
         const lx = hb.length + margin * 2;
         const ly = hb.width + margin * 2;
         const rx = hb.offsetX - lx / 2;
@@ -236,7 +256,8 @@ export function renderParametricLayerQ1(layer, index, shaderSim, isInteractiveSe
     }
   }
 
-  const bodyHtml = `<g id="${layer.id}" clip-path="url(#${clipId})">${innerHtml}</g>`;
+  const maskAttr = layer.cutBySmallPadSafeArea ? ` mask="url(#mask_small_pad_safe_q1)"` : '';
+  const bodyHtml = `<g id="${layer.id}" clip-path="url(#${clipId})"${maskAttr}>${innerHtml}</g>`;
   return { defsHtml, bodyHtml };
 }
 
@@ -247,7 +268,6 @@ export function renderReferenceOverlayQ1(project, activeLayer = null) {
   const ref = project.referenceOverlays || {};
   const parts = [];
 
-  // Custom uploaded SVG backdrop if provided
   if (ref.customSvgContent && ref.customSvgVisible) {
     const encoded = encodeURIComponent(ref.customSvgContent);
     parts.push(`<image href="data:image/svg+xml;utf8,${encoded}" x="0" y="0" width="4096" height="6000" opacity="${ref.customSvgOpacity ?? 0.45}" preserveAspectRatio="none" />`);
@@ -287,18 +307,18 @@ export function renderReferenceOverlayQ1(project, activeLayer = null) {
     parts.push(`<line x1="0" y1="${ARENA_CONSTANTS.BALL_SCORE_CENTER_Y}" x2="892.75" y2="${ARENA_CONSTANTS.BALL_SCORE_CENTER_Y}" stroke="#f43f5e" stroke-width="5" />`);
   }
 
-  // 4. Boost Pads (Cylinder R=208 / R=144; optional hysteresis box)
+  // 4. Boost Pads (Cylinder R=208 / R=144; optional Small Pad Safe Area circle)
   if (ref.showBoostPads) {
     let padsHtml = '<g id="Ref_BoostPads">';
     for (const p of Q1_BOOST_PADS_BIG) {
-      padsHtml += `<circle cx="${p.x}" cy="${p.y}" r="${ARENA_CONSTANTS.PAD_CYL_RAD_BIG}" fill="rgba(251, 191, 36, 0.16)" stroke="#fbbf24" stroke-width="7" />`;
+      padsHtml += `<circle cx="${p.x}" cy="${p.y}" r="${ARENA_CONSTANTS.PAD_CYL_RAD_BIG}" fill="rgba(251, 191, 36, 0.14)" stroke="#fbbf24" stroke-width="6" stroke-dasharray="14,10" />`;
       if (ref.showBoostPadLockBoxes) {
         padsHtml += `<rect x="${p.x - 160}" y="${p.y - 160}" width="320" height="320" fill="none" stroke="#f59e0b" stroke-width="4" stroke-dasharray="12,8" />`;
       }
       padsHtml += `<circle cx="${p.x}" cy="${p.y}" r="12" fill="#fbbf24" />`;
     }
     for (const p of Q1_BOOST_PADS_SMALL) {
-      padsHtml += `<circle cx="${p.x}" cy="${p.y}" r="${ARENA_CONSTANTS.PAD_CYL_RAD_SMALL}" fill="rgba(56, 189, 248, 0.15)" stroke="#38bdf8" stroke-width="6" />`;
+      padsHtml += `<circle cx="${p.x}" cy="${p.y}" r="${ARENA_CONSTANTS.PAD_CYL_RAD_SMALL}" fill="rgba(56, 189, 248, 0.12)" stroke="#38bdf8" stroke-width="5" stroke-dasharray="12,8" />`;
       if (ref.showBoostPadLockBoxes) {
         padsHtml += `<rect x="${p.x - 120}" y="${p.y - 120}" width="240" height="240" fill="none" stroke="#0284c7" stroke-width="4" stroke-dasharray="10,6" />`;
       }
@@ -306,6 +326,18 @@ export function renderReferenceOverlayQ1(project, activeLayer = null) {
     }
     padsHtml += '</g>';
     parts.push(padsHtml);
+  }
+
+  // 4b. Small Pad Safe Area Visualization (R = 144 + smallPadSafeExpand)
+  if (ref.showSmallPadSafeArea) {
+    const expand = Math.max(0, Number(project.smallPadSafeExpand ?? 60));
+    const safeR = ARENA_CONSTANTS.PAD_CYL_RAD_SMALL + expand;
+    let safeHtml = '<g id="Ref_SmallPad_SafeArea">';
+    for (const p of Q1_BOOST_PADS_SMALL) {
+      safeHtml += `<circle cx="${p.x}" cy="${p.y}" r="${safeR.toFixed(2)}" fill="rgba(236, 72, 153, 0.06)" stroke="#f472b6" stroke-width="5" stroke-dasharray="16,12" />`;
+    }
+    safeHtml += '</g>';
+    parts.push(safeHtml);
   }
 
   // 5. Kickoff Spawns & Demo Respawns + Car Hitbox Alignment
@@ -335,7 +367,7 @@ export function renderReferenceOverlayQ1(project, activeLayer = null) {
     for (const sp of Q1_DEMO_RESPAWNS) parts.push(renderCarRef(sp, true));
   }
 
-  // 6. Active Layer Interactive Handles (e.g. 3-Point Arc P1/P2/P3 or Circle Center)
+  // 6. Active Layer Interactive Handles
   if (activeLayer && activeLayer.visible) {
     if (activeLayer.type === 'three_point_arc') {
       const pts = [
@@ -372,7 +404,7 @@ export function buildArenaSvgString(project, {
   const shaderSim = useShaderPreview ? { ...project.shaderPreview, enabled: true } : null;
   const bgColor = grayToCss(project.backgroundGray ?? 0, 1.0, shaderSim);
 
-  let allDefs = '';
+  let allDefs = buildSmallPadSafeAreaMaskDef(project);
   let allBodies = '';
 
   project.layers.forEach((layer, idx) => {
@@ -405,7 +437,6 @@ export function buildArenaSvgString(project, {
 </svg>`;
   }
 
-  // Full 4-Quadrant Mirrored Arena: viewBox = [-scopeW, -scopeH, scopeW*2, scopeH*2]
   const fullW = scopeW * 2;
   const fullH = scopeH * 2;
   const outW = customPixelWidth || fullW;
