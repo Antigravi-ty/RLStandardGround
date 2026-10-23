@@ -2,6 +2,8 @@ import {
   ARENA_CONSTANTS,
   Q1_FLAT_FLOOR_CONTOUR,
   Q1_PITCH_FLAT_FLOOR_CONTOUR,
+  Q1_DRIFTWOODS_GROUND_MESH_CONTOUR,
+  Q1_DRIFTWOODS_PITCH_MESH_CONTOUR,
   Q1_OUTER_WALL_CONTOUR,
   Q1_PITCH_OUTER_WALL_CONTOUR,
   Q1_BOOST_PADS_BIG,
@@ -34,6 +36,10 @@ export function getScopeDimensions(canvasScope) {
 
 function getBaseContourPoints(baseContour) {
   switch (baseContour) {
+    case 'driftwoods_ground_mesh':
+      return Q1_DRIFTWOODS_GROUND_MESH_CONTOUR;
+    case 'driftwoods_pitch_mesh':
+      return Q1_DRIFTWOODS_PITCH_MESH_CONTOUR;
     case 'full_flat_floor':
       return Q1_FLAT_FLOOR_CONTOUR;
     case 'outer_wall':
@@ -375,6 +381,11 @@ export function renderReferenceOverlayQ1(project, {
   if (ref.showFlatFloorZ0) {
     const floorD = pointsToPathD(Q1_FLAT_FLOOR_CONTOUR, false);
     parts.push(`<path d="${floorD}" fill="rgba(16, 185, 129, 0.04)" stroke="#10b981" stroke-width="9" stroke-dasharray="24,12" />`);
+  }
+
+  if (ref.showDriftwoodsGroundMesh) {
+    const dwFloorD = pointsToPathD(Q1_DRIFTWOODS_GROUND_MESH_CONTOUR, false);
+    parts.push(`<path d="${dwFloorD}" fill="rgba(56, 189, 248, 0.04)" stroke="#38bdf8" stroke-width="9" stroke-dasharray="18,10" />`);
   }
 
   // 3. Goal Box & Score Line

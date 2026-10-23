@@ -193,6 +193,13 @@ export function buildTextureManifest(project, {
           goalPostX: 760,
           goalBackY: 5880
         },
+        driftwoods3DStadiumGroundMeshBoundary: {
+          sideX: 3839.99,
+          backY: 4928.0,
+          goalPostOuterX: 946.31,
+          goalMouthInnerX: 702.98,
+          goalBackY: 5755.61
+        },
         smallPadPickupRadiusUU: 144,
         smallPadSafeAreaExpandUU: Number(project.smallPadSafeExpand ?? 60),
         smallPadSafeAreaTotalRadiusUU: 144 + Number(project.smallPadSafeExpand ?? 60),
@@ -252,11 +259,366 @@ export function exportSvgFile(project, mode = 'q1', includeReference = false, us
   downloadBlob(blob, `rl_ground_${suffix}${colorTag}${includeReference ? '_with_ref' : ''}.svg`);
 }
 
+/**
+ * Pure-JS RFC 9649 WebP Lossless (VP8L) bitstream encoder with LZ77 Run-Length + Canonical Huffman coding.
+ * Guarantees 100% genuine lossless WebP (`VP8L`) output across all browsers (even Safari/WebKit or when
+ * browser `canvas.toBlob('image/webp', 1.0)` falls back to lossy `VP8 ` or PNG).
+ */
+export function encodeLosslessWebpVP8L(rgba, width, height) {
+  const numPixels = width * height;
+  const pixels32 = new Uint32Array(numPixels);
+  let allGrayOpaque = true;
+  for (let i = 0, p = 0; i < numPixels; i++, p += 4) {
+    const r = rgba[p];
+    const g = rgba[p + 1];
+    const b = rgba[p + 2];
+    const a = rgba[p + 3];
+    if (r !== g || g !== b || a !== 255) allGrayOpaque = false;
+    pixels32[i] = ((a << 24) | (r << 16) | (g << 8) | b) >>> 0;
+  }
+
+  function buildCanonicalCodes(freqs, maxBits = 15) {
+    const n = freqs.length;
+    const lengths = new Uint8Array(n);
+    const codes = new Uint16Array(n);
+    const active = [];
+    for (let i = 0; i < n; i++) {
+      if (freqs[i] > 0) active.push(i);
+    }
+    if (active.length === 0) {
+      lengths[0] = 1;
+      return { lengths, codes, active: [0] };
+    }
+    if (active.length === 1) {
+      lengths[active[0]] = 1;
+      codes[active[0]] = 0;
+      return { lengths, codes, active };
+    }
+
+    let nodes = active.map(sym => ({ weight: freqs[sym], syms: [sym], depth: 0 }));
+    while (nodes.length > 1) {
+      nodes.sort((a, b) => a.weight - b.weight || a.depth - b.depth);
+      const left = nodes.shift();
+      const right = nodes.shift();
+      for (const s of left.syms) lengths[s]++;
+      for (const s of right.syms) lengths[s]++;
+      nodes.push({
+        weight: left.weight + right.weight,
+        syms: left.syms.concat(right.syms),
+        depth: Math.max(left.depth, right.depth) + 1
+      });
+    }
+
+    let maxLen = 0;
+    for (const s of active) {
+      if (lengths[s] > maxLen) maxLen = lengths[s];
+    }
+    if (maxLen > maxBits) {
+      const blCount = new Int32Array(maxBits + 1);
+      const symsByFreq = [...active].sort((a, b) => freqs[b] - freqs[a]);
+      for (const s of active) {
+        const l = Math.min(maxBits, lengths[s]);
+        lengths[s] = l;
+        blCount[l]++;
+      }
+      let kraft = 0;
+      for (let bits = 1; bits <= maxBits; bits++) {
+        kraft += blCount[bits] * (1 << (maxBits - bits));
+      }
+      const target = 1 << maxBits;
+      let idx = symsByFreq.length - 1;
+      while (kraft > target && idx >= 0) {
+        const s = symsByFreq[idx];
+        if (lengths[s] < maxBits) {
+          kraft -= (1 << (maxBits - lengths[s])) - (1 << (maxBits - (lengths[s] + 1)));
+          lengths[s]++;
+        } else {
+          idx--;
+        }
+      }
+    }
+
+    const blCount = new Int32Array(maxBits + 1);
+    for (const s of active) blCount[lengths[s]]++;
+    const nextCode = new Int32Array(maxBits + 1);
+    let code = 0;
+    for (let bits = 1; bits <= maxBits; bits++) {
+      code = (code + blCount[bits - 1]) << 1;
+      nextCode[bits] = code;
+    }
+    const sortedSyms = [...active].sort((a, b) => lengths[a] - lengths[b] || a - b);
+    for (const s of sortedSyms) {
+      const len = lengths[s];
+      const c = nextCode[len]++;
+      let rev = 0;
+      for (let b = 0; b < len; b++) {
+        rev = (rev << 1) | ((c >>> b) & 1);
+      }
+      codes[s] = rev;
+    }
+    return { lengths, codes, active };
+  }
+
+  function lengthToPrefix(val) {
+    if (val < 5) return { code: val - 1, extraBits: 0, extraVal: 0 };
+    const v = val - 1;
+    const msb = 31 - Math.clz32(v);
+    const extraBits = msb - 1;
+    const secondBit = (v >>> extraBits) & 1;
+    const code = 2 * msb + secondBit;
+    const extraVal = v & ((1 << extraBits) - 1);
+    return { code, extraBits, extraVal };
+  }
+
+  const tokens = [];
+  const freqG = new Uint32Array(256 + 24);
+  const freqR = new Uint32Array(256);
+  const freqB = new Uint32Array(256);
+  const freqA = new Uint32Array(256);
+  const freqD = new Uint32Array(40);
+
+  let i = 0;
+  while (i < numPixels) {
+    if (i > 0 && pixels32[i] === pixels32[i - 1]) {
+      let run = 1;
+      while (i + run < numPixels && run < 4096 && pixels32[i + run] === pixels32[i - 1]) {
+        run++;
+      }
+      if (run >= 2) {
+        const lp = lengthToPrefix(run);
+        const sym = 256 + lp.code;
+        freqG[sym]++;
+        freqD[1]++;
+        tokens.push({ isLen: true, sym, extraBits: lp.extraBits, extraVal: lp.extraVal });
+        i += run;
+        continue;
+      }
+    }
+    const px = pixels32[i];
+    const a = (px >>> 24) & 255;
+    const r = (px >>> 16) & 255;
+    const g = (px >>> 8) & 255;
+    const b = px & 255;
+    const rSub = allGrayOpaque ? 0 : ((r - g) & 255);
+    const bSub = allGrayOpaque ? 0 : ((b - g) & 255);
+    freqG[g]++;
+    freqR[rSub]++;
+    freqB[bSub]++;
+    freqA[a]++;
+    tokens.push({ isLen: false, g, r: rSub, b: bSub, a });
+    i++;
+  }
+
+  const huffG = buildCanonicalCodes(freqG, 15);
+  const huffR = buildCanonicalCodes(freqR, 15);
+  const huffB = buildCanonicalCodes(freqB, 15);
+  const huffA = buildCanonicalCodes(freqA, 15);
+  const huffD = buildCanonicalCodes(freqD, 15);
+
+  const bytes = [];
+  let bitBuf = 0;
+  let bitCount = 0;
+  function writeBits(val, nBits) {
+    let v = val >>> 0;
+    let rem = nBits;
+    while (rem > 0) {
+      const take = Math.min(rem, 24 - bitCount);
+      const mask = (1 << take) - 1;
+      bitBuf |= (v & mask) << bitCount;
+      bitCount += take;
+      v >>>= take;
+      rem -= take;
+      while (bitCount >= 8) {
+        bytes.push(bitBuf & 255);
+        bitBuf >>>= 8;
+        bitCount -= 8;
+      }
+    }
+  }
+
+  writeBits(0x2f, 8);
+  writeBits((width - 1) & 0x3fff, 14);
+  writeBits((height - 1) & 0x3fff, 14);
+  writeBits(0, 1); // alpha_is_used = 0
+  writeBits(0, 3); // version = 0
+
+  if (allGrayOpaque) {
+    writeBits(1, 1); // transform present
+    writeBits(2, 2); // SUBTRACT_GREEN_TRANSFORM
+  }
+  writeBits(0, 1); // no more transforms
+  writeBits(0, 1); // no color cache
+  writeBits(0, 1); // no meta huffman
+
+  const kCodeLengthCodeOrder = [17, 18, 0, 1, 2, 3, 4, 5, 16, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+  function writeHuffmanTree(huff) {
+    const active = huff.active;
+    if (active.length <= 2 && active.every(s => s < 256)) {
+      writeBits(1, 1);
+      writeBits(active.length - 1, 1);
+      const s0 = active[0];
+      if (s0 < 2) {
+        writeBits(0, 1);
+        writeBits(s0, 1);
+      } else {
+        writeBits(1, 1);
+        writeBits(s0, 8);
+      }
+      if (active.length === 2) {
+        writeBits(active[1], 8);
+      }
+      return;
+    }
+
+    writeBits(0, 1);
+    const numSyms = huff.lengths.length;
+    const clFreq = new Uint32Array(19);
+    for (let s = 0; s < numSyms; s++) {
+      clFreq[huff.lengths[s]]++;
+    }
+    const clHuff = buildCanonicalCodes(clFreq, 7);
+    let numClCodes = 19;
+    while (numClCodes > 4 && clHuff.lengths[kCodeLengthCodeOrder[numClCodes - 1]] === 0) {
+      numClCodes--;
+    }
+    writeBits(numClCodes - 4, 4);
+    for (let k = 0; k < numClCodes; k++) {
+      writeBits(clHuff.lengths[kCodeLengthCodeOrder[k]], 3);
+    }
+    writeBits(0, 1);
+    for (let s = 0; s < numSyms; s++) {
+      const len = huff.lengths[s];
+      writeBits(clHuff.codes[len], clHuff.lengths[len]);
+    }
+  }
+
+  writeHuffmanTree(huffG);
+  writeHuffmanTree(huffR);
+  writeHuffmanTree(huffB);
+  writeHuffmanTree(huffA);
+  writeHuffmanTree(huffD);
+
+  const singleG = huffG.active.length === 1;
+  const singleR = huffR.active.length === 1;
+  const singleB = huffB.active.length === 1;
+  const singleA = huffA.active.length === 1;
+  const singleD = huffD.active.length === 1;
+
+  for (let t = 0; t < tokens.length; t++) {
+    const tok = tokens[t];
+    if (tok.isLen) {
+      if (!singleG) writeBits(huffG.codes[tok.sym], huffG.lengths[tok.sym]);
+      if (tok.extraBits > 0) writeBits(tok.extraVal, tok.extraBits);
+      if (!singleD) writeBits(huffD.codes[1], huffD.lengths[1]);
+    } else {
+      if (!singleG) writeBits(huffG.codes[tok.g], huffG.lengths[tok.g]);
+      if (!singleR) writeBits(huffR.codes[tok.r], huffR.lengths[tok.r]);
+      if (!singleB) writeBits(huffB.codes[tok.b], huffB.lengths[tok.b]);
+      if (!singleA) writeBits(huffA.codes[tok.a], huffA.lengths[tok.a]);
+    }
+  }
+
+  if (bitCount > 0) {
+    bytes.push(bitBuf & 255);
+  }
+
+  const vp8lSize = bytes.length;
+  const pad = vp8lSize & 1;
+  const riffSize = 4 + 8 + vp8lSize + pad;
+  const out = new Uint8Array(8 + riffSize);
+  const dv = new DataView(out.buffer);
+  out.set([82, 73, 70, 70], 0); // 'RIFF'
+  dv.setUint32(4, riffSize, true);
+  out.set([87, 69, 66, 80], 8); // 'WEBP'
+  out.set([86, 80, 56, 76], 12); // 'VP8L'
+  dv.setUint32(16, vp8lSize, true);
+  out.set(bytes, 20);
+  return new Blob([out], { type: 'image/webp' });
+}
+
+/**
+ * Optional post-process on Canvas ImageData: snaps anti-aliased edge pixels in grayscale mode
+ * directly to their exact discrete palette grayscale level (or L0 background if below threshold)
+ * so every pixel in the exported texture has 0 anti-aliasing intermediate grayscale values.
+ */
+function quantizeGrayscaleCanvasPixels(ctx, width, height, project, thresholdNorm = 0.25) {
+  const imgData = ctx.getImageData(0, 0, width, height);
+  const data = imgData.data;
+  const rawLevels = project.colorPalettePreview?.levels || [];
+  const sortedCenters = rawLevels
+    .map(l => Math.max(0, Math.min(255, Math.round(Number(l.gray) || 0))))
+    .sort((a, b) => a - b);
+  const bgGray = sortedCenters[0] ?? 0;
+
+  // Step 1: Build single-channel luminance map
+  const lum = new Uint8Array(width * height);
+  for (let i = 0, p = 0; i < lum.length; i++, p += 4) {
+    lum[i] = data[p];
+  }
+
+  // Step 2: For each pixel, find 3x3 local peak to classify its true layer, then threshold coverage
+  for (let y = 0; y < height; y++) {
+    const y0 = Math.max(0, y - 1);
+    const y1 = Math.min(height - 1, y + 1);
+    for (let x = 0; x < width; x++) {
+      const idx = y * width + x;
+      const g = lum[idx];
+      if (g <= bgGray) continue;
+
+      let peak = g;
+      const x0 = Math.max(0, x - 1);
+      const x1 = Math.min(width - 1, x + 1);
+      for (let ny = y0; ny <= y1; ny++) {
+        const rowOff = ny * width;
+        for (let nx = x0; nx <= x1; nx++) {
+          const ng = lum[rowOff + nx];
+          if (ng > peak) peak = ng;
+        }
+      }
+
+      // Snap peak to nearest discrete palette center
+      let nearestCenter = sortedCenters[0] ?? 0;
+      let minDiff = Math.abs(peak - nearestCenter);
+      for (let k = 1; k < sortedCenters.length; k++) {
+        const d = Math.abs(peak - sortedCenters[k]);
+        if (d < minDiff) {
+          minDiff = d;
+          nearestCenter = sortedCenters[k];
+        }
+      }
+
+      const coverage = nearestCenter > bgGray ? (g - bgGray) / (nearestCenter - bgGray) : 0;
+      const outG = coverage >= thresholdNorm ? nearestCenter : bgGray;
+      const p = idx * 4;
+      data[p] = outG;
+      data[p + 1] = outG;
+      data[p + 2] = outG;
+      data[p + 3] = 255;
+    }
+  }
+  ctx.putImageData(imgData, 0, 0);
+}
+
+/**
+ * Checks whether a Blob produced by `canvas.toBlob(..., 'image/webp', 1.0)` is a genuine
+ * Lossless WebP (`VP8L` chunk header at byte offset 12..16).
+ */
+async function isLosslessVP8LBlob(blob) {
+  if (!blob || blob.size < 20) return false;
+  const headerBuf = await blob.slice(0, 16).arrayBuffer();
+  const u8 = new Uint8Array(headerBuf);
+  const riff = String.fromCharCode(u8[0], u8[1], u8[2], u8[3]);
+  const webp = String.fromCharCode(u8[8], u8[9], u8[10], u8[11]);
+  const chunk = String.fromCharCode(u8[12], u8[13], u8[14], u8[15]);
+  return riff === 'RIFF' && webp === 'WEBP' && chunk === 'VP8L';
+}
+
 export async function exportRasterTexture(project, {
   mode = 'q1',
   width = 2048,
   height = 3000,
-  format = 'image/webp', // 'image/webp' | 'image/png'
+  format = 'image/webp', // 'image/webp' (Lossless VP8L) | 'image/png'
+  edgeMode = 'aa_continuous', // 'aa_continuous' (Anti-Aliased Continuous) | 'quantized_sharp' (Strict Discrete Grayscale)
   useShaderPreview = false,
   useColorPalettePreview = false,
   includeReference = false
@@ -279,23 +641,49 @@ export async function exportRasterTexture(project, {
       const canvas = document.createElement('canvas');
       canvas.width = width;
       canvas.height = height;
-      const ctx = canvas.getContext('2d');
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
       ctx.drawImage(img, 0, 0, width, height);
       URL.revokeObjectURL(url);
+
+      if (edgeMode === 'quantized_sharp' && !useColorPalettePreview && !useShaderPreview) {
+        quantizeGrayscaleCanvasPixels(ctx, width, height, project, 0.25);
+      }
 
       const ext = format === 'image/webp' ? 'webp' : 'png';
       const prefix = mode === 'q1' ? 'ground_q1' : 'ground_full';
       const lvlCount = project.colorPalettePreview?.levels?.length || 7;
       const typeTag = useColorPalettePreview ? `${lvlCount}color` : (useShaderPreview ? 'tinted' : `${lvlCount}gray`);
+      const filename = `${prefix}_${typeTag}_${width}x${height}.${ext}`;
+
+      if (format === 'image/webp') {
+        // Request quality = 1.0 (which triggers VP8L lossless in Chromium/Firefox) and verify the VP8L chunk header;
+        // if the browser produced lossy VP8 or fell back to PNG (e.g. Safari), encode directly via our RFC 9649 VP8L encoder.
+        canvas.toBlob(async (nativeBlob) => {
+          try {
+            if (await isLosslessVP8LBlob(nativeBlob)) {
+              downloadBlob(nativeBlob, filename);
+              resolve();
+              return;
+            }
+            const imgData = ctx.getImageData(0, 0, width, height);
+            const vp8lBlob = encodeLosslessWebpVP8L(imgData.data, width, height);
+            downloadBlob(vp8lBlob, filename);
+            resolve();
+          } catch (err) {
+            reject(err);
+          }
+        }, 'image/webp', 1.0);
+        return;
+      }
 
       canvas.toBlob((blob) => {
         if (!blob) {
           reject(new Error('Canvas toBlob failed'));
           return;
         }
-        downloadBlob(blob, `${prefix}_${typeTag}_${width}x${height}.${ext}`);
+        downloadBlob(blob, filename);
         resolve();
-      }, format, 0.98);
+      }, format);
     };
     img.onerror = (err) => {
       URL.revokeObjectURL(url);

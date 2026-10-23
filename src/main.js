@@ -12,12 +12,16 @@ import { buildArenaSvgString, getScopeDimensions } from './svgRenderer.js';
 import {
   EXPORT_PRESETS,
   resolvePresetDimensions,
+  autoDistributePaletteGrayLevels,
+  computePaletteIntervals,
+  buildTextureManifest,
+  exportManifestJson,
   exportProjectJson,
   exportSvgFile,
   exportRasterTexture
 } from './exporter.js';
 
-const STORAGE_KEY = 'rl_standard_ground_project_v5';
+const STORAGE_KEY = 'rl_standard_ground_project_v6';
 
 class GroundStudioApp {
   constructor() {
@@ -1138,8 +1142,10 @@ class GroundStudioApp {
         <div class="field-row">
           <div class="field-label"><span>基准轮廓线 (Base Contour)</span></div>
           <select id="inspBaseContour">
-            <option value="full_flat_floor" ${layer.baseContour === 'full_flat_floor' ? 'selected' : ''}>🟢 Z=0 纯平含球门边界 (完整贴合绿虚线)</option>
-            <option value="pitch_flat_floor" ${layer.baseContour === 'pitch_flat_floor' ? 'selected' : ''}>🟢 Z=0 纯平主场地边界 (球门线处闭合)</option>
+            <option value="driftwoods_ground_mesh" ${layer.baseContour === 'driftwoods_ground_mesh' ? 'selected' : ''}>💠 场地3D地面模型含球门边界 (Driftwoods Ground Mesh, Y=4928)</option>
+            <option value="driftwoods_pitch_mesh" ${layer.baseContour === 'driftwoods_pitch_mesh' ? 'selected' : ''}>💠 场地3D地面模型主场地边界 (球门线处闭合, Y=4928)</option>
+            <option value="full_flat_floor" ${layer.baseContour === 'full_flat_floor' ? 'selected' : ''}>🟢 物理引擎 Z=0 纯平含球门边界 (CMF Physics, Y=4964.95)</option>
+            <option value="pitch_flat_floor" ${layer.baseContour === 'pitch_flat_floor' ? 'selected' : ''}>🟢 物理引擎 Z=0 纯平主场地边界 (球门线处闭合)</option>
             <option value="pitch_outer_wall" ${layer.baseContour === 'pitch_outer_wall' ? 'selected' : ''}>🔵 4096×5120 垂直外墙轮廓</option>
             <option value="outer_wall" ${layer.baseContour === 'outer_wall' ? 'selected' : ''}>🔵 4096×6000 含球门外墙轮廓</option>
           </select>

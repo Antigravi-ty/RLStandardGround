@@ -9,18 +9,18 @@
  */
 
 export const DEFAULT_GRAY_PALETTE_LEVELS = [
-  { level: 0, name: 'L0 地面空余基底 (Ground)', gray: 0, color: '#141b24' },
+  { level: 0, name: 'L0 地面空余基底 (Ground)', gray: 0, color: '#174000' },
   { level: 1, name: 'L1 场地外边界线 (Perimeter)', gray: 42, color: '#38bdf8' },
-  { level: 2, name: 'L2 Boost Pad 判定内收环', gray: 85, color: '#929292' },
-  { level: 3, name: 'L3 核心实线/主圆弧/斜向引导', gray: 128, color: '#34d399' },
-  { level: 4, name: 'L4 车辆生成点碰撞箱四角框', gray: 170, color: '#e392fe' },
-  { level: 5, name: 'L5 内场衔接虚线弧 (33 + 14)', gray: 212, color: '#fb923c' },
+  { level: 2, name: 'L2 Boost Pad 判定内收环', gray: 85, color: '#ffffff' },
+  { level: 3, name: 'L3 核心实线/主圆弧/斜向引导', gray: 128, color: '#ffffff' },
+  { level: 4, name: 'L4 车辆生成点碰撞箱四角框', gray: 170, color: '#606060' },
+  { level: 5, name: 'L5 内场衔接虚线弧 (33 + 14)', gray: 212, color: '#444444' },
   { level: 6, name: 'L6 外围长距三点圆弧 & 后场虚线', gray: 255, color: '#f87171' }
 ];
 
 export const DEFAULT_PROJECT = {
-  version: '2.3.0',
-  name: 'Minimal Soccar Ground v2 (7-Level High-Contrast Palette)',
+  version: '2.4.0',
+  name: 'Minimal Soccar Ground v2 (7-Level Lossless WebP + 3D Stadium Ground Mesh)',
   canvasScope: 'pitch_and_goal', // 'pitch_only' (4096x5120 Q1) | 'pitch_and_goal' (4096x6000 Q1) | 'driftwoods_uv' (3840x5755.61 Q1)
   backgroundGray: 0,
 
@@ -45,6 +45,7 @@ export const DEFAULT_PROJECT = {
   referenceOverlays: {
     showGrid: false,
     showFlatFloorZ0: false,
+    showDriftwoodsGroundMesh: false,
     showOuterWall: false,
     showGoalBox: false,
     showBoostPads: false,
@@ -61,11 +62,11 @@ export const DEFAULT_PROJECT = {
   layers: [
     {
       id: 'layer_perimeter_border',
-      name: '1. 紧贴绿虚线内缩边线 (Z=0 内侧)',
+      name: '1. 紧贴场地3D地面模型外缘内缩边线 (Driftwoods Ground Mesh)',
       type: 'contour_offset',
       visible: true,
       grayLevel: 1,
-      baseContour: 'full_flat_floor',
+      baseContour: 'driftwoods_ground_mesh',
       hugInnerEdge: true,
       insetDist: 0,
       strokeWidth: 20,
@@ -564,7 +565,7 @@ export function createNewLayerTemplate(type, index = 1) {
         name: `${index}. 场地边界内缩线`,
         type: 'contour_offset',
         visible: true,
-        baseContour: 'full_flat_floor',
+        baseContour: 'driftwoods_ground_mesh',
         hugInnerEdge: true,
         insetDist: 0,
         strokeWidth: 20,

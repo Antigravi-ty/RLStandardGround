@@ -462,7 +462,12 @@ export function distanceToLayerQ1(layer, px, py) {
   }
 
   if (layer.type === 'contour_offset') {
-    const base = layer.baseContour === 'pitch_flat_floor' ? Q1_PITCH_FLAT_FLOOR_CONTOUR : Q1_FLAT_FLOOR_CONTOUR;
+    let base = Q1_FLAT_FLOOR_CONTOUR;
+    if (layer.baseContour === 'driftwoods_ground_mesh') base = Q1_DRIFTWOODS_GROUND_MESH_CONTOUR;
+    else if (layer.baseContour === 'driftwoods_pitch_mesh') base = Q1_DRIFTWOODS_PITCH_MESH_CONTOUR;
+    else if (layer.baseContour === 'pitch_flat_floor') base = Q1_PITCH_FLAT_FLOOR_CONTOUR;
+    else if (layer.baseContour === 'outer_wall') base = Q1_OUTER_WALL_CONTOUR;
+    else if (layer.baseContour === 'pitch_outer_wall') base = Q1_PITCH_OUTER_WALL_CONTOUR;
     const sw = Number(layer.strokeWidth) || 0;
     const inset = (layer.hugInnerEdge ? sw * 0.5 : 0) + (Number(layer.insetDist) || 0);
     const pts = offsetQ1Contour(base, inset);
