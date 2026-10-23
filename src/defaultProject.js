@@ -2,25 +2,25 @@
  * Default Parametric Project State for RLStandardGround Studio.
  * All spatial dimensions are in 1:1 Unreal Units (UU).
  * Grayscale values are in 0..255 (0 = pure black ground base, 255 = pure white line).
- * Supports 10-Level Grayscale & Color Palette (Level 0 = Ground Base + Levels 1..9 = 9 Line/Zone Grayscale Tiers).
+ *
+ * Compact 7-Level Grayscale & Color Palette (Level 0 = Ground Base + Levels 1..6 = 6 Active Line Tiers):
+ * Uses a maximum-separation 42.5-step grayscale ladder (0, 42, 85, 128, 170, 212, 255) so WebP textures
+ * have ~1.5x wider luminance margin between adjacent tiers for downstream shaders & users.
  */
 
 export const DEFAULT_GRAY_PALETTE_LEVELS = [
   { level: 0, name: 'L0 地面空余基底 (Ground)', gray: 0, color: '#141b24' },
-  { level: 1, name: 'L1 灰度层级 1 (边线/外框)', gray: 28, color: '#38bdf8' },
-  { level: 2, name: 'L2 灰度层级 2 (Boost Pad环)', gray: 57, color: '#fbbf24' },
-  { level: 3, name: 'L3 灰度层级 3 (中场圆/主线)', gray: 85, color: '#34d399' },
-  { level: 4, name: 'L4 灰度层级 4 (车位碰撞框)', gray: 113, color: '#f472b6' },
-  { level: 5, name: 'L5 灰度层级 5 (橄榄球曲线)', gray: 142, color: '#a855f7' },
-  { level: 6, name: 'L6 灰度层级 6 (内场圆弧)', gray: 170, color: '#fb923c' },
-  { level: 7, name: 'L7 灰度层级 7 (车位引导虚线)', gray: 198, color: '#2dd4bf' },
-  { level: 8, name: 'L8 灰度层级 8 (长距三点圆弧)', gray: 227, color: '#f87171' },
-  { level: 9, name: 'L9 灰度层级 9 (高亮主标线)', gray: 255, color: '#facc15' }
+  { level: 1, name: 'L1 场地外边界线 (Perimeter)', gray: 42, color: '#38bdf8' },
+  { level: 2, name: 'L2 Boost Pad 判定内收环', gray: 85, color: '#929292' },
+  { level: 3, name: 'L3 核心实线/主圆弧/斜向引导', gray: 128, color: '#34d399' },
+  { level: 4, name: 'L4 车辆生成点碰撞箱四角框', gray: 170, color: '#e392fe' },
+  { level: 5, name: 'L5 内场衔接虚线弧 (33 + 14)', gray: 212, color: '#fb923c' },
+  { level: 6, name: 'L6 外围长距三点圆弧 & 后场虚线', gray: 255, color: '#f87171' }
 ];
 
 export const DEFAULT_PROJECT = {
-  version: '2.2.0',
-  name: 'Minimal Soccar Ground v2 (10-Level Palette)',
+  version: '2.3.0',
+  name: 'Minimal Soccar Ground v2 (7-Level High-Contrast Palette)',
   canvasScope: 'pitch_and_goal', // 'pitch_only' (4096x5120 Q1) | 'pitch_and_goal' (4096x6000 Q1) | 'driftwoods_uv' (3840x5755.61 Q1)
   backgroundGray: 0,
 
@@ -28,7 +28,7 @@ export const DEFAULT_PROJECT = {
   smallPadSafeExpand: 60,
   bigPadSafeExpand: 0,
 
-  // 10-Level Grayscale & Color Palette (Level 0 = Ground Empty Base, Levels 1..9 = 9 Grayscale Tiers)
+  // 7-Level Grayscale & Color Palette (Level 0 = Ground Empty Base, Levels 1..6 = 6 Active Line Tiers, ΔGray ≈ 42.5)
   colorPalettePreview: {
     enabled: true,
     levels: DEFAULT_GRAY_PALETTE_LEVELS.map(l => ({ ...l }))
@@ -44,12 +44,12 @@ export const DEFAULT_PROJECT = {
 
   referenceOverlays: {
     showGrid: false,
-    showFlatFloorZ0: true,
+    showFlatFloorZ0: false,
     showOuterWall: false,
-    showGoalBox: true,
-    showBoostPads: true,
-    showPadNumbers: true,
-    showSmallPadSafeArea: true,
+    showGoalBox: false,
+    showBoostPads: false,
+    showPadNumbers: false,
+    showSmallPadSafeArea: false,
     showBoostPadLockBoxes: false,
     showSpawns: false,
     showHitboxPreset: 'all',
@@ -69,7 +69,7 @@ export const DEFAULT_PROJECT = {
       hugInnerEdge: true,
       insetDist: 0,
       strokeWidth: 20,
-      gray: 28,
+      gray: 42,
       fillGray: -1,
       opacity: 1,
       dashLength: 0,
@@ -95,7 +95,7 @@ export const DEFAULT_PROJECT = {
       insetFromPickup: 0,
       radius: 134,
       strokeWidth: 20,
-      gray: 57,
+      gray: 85,
       fillGray: -1,
       outerDashRadius: 0,
       outerDashWidth: 0,
@@ -125,7 +125,7 @@ export const DEFAULT_PROJECT = {
       trimStart: 0,
       trimEnd: 0,
       strokeWidth: 20,
-      gray: 85,
+      gray: 128,
       fillGray: -1,
       opacity: 1,
       dashLength: 0,
@@ -144,14 +144,14 @@ export const DEFAULT_PROJECT = {
       type: 'spawn_marker_group',
       visible: true,
       grayLevel: 4,
-      targetSpawns: 'both', // 'kickoff' | 'demo' | 'both'
-      shape: 'union_corners', // 'union_corners' | 'union_rect' | 'hitbox_outline' | 'circle' | 'crosshair'
+      targetSpawns: 'both',
+      shape: 'union_corners',
       hitboxPreset: 'octane',
       cornerLength: 28,
       expandMargin: 0,
-      hugOuterEdge: true, // Shifts corner stroke center outward by strokeWidth/2 so inner edge hugs exact union AABB
+      hugOuterEdge: true,
       strokeWidth: 8,
-      gray: 113,
+      gray: 170,
       fillGray: -1,
       opacity: 1,
       dashLength: 0,
@@ -168,7 +168,7 @@ export const DEFAULT_PROJECT = {
       id: 'layer_monotone_5pad_oval',
       name: '11',
       type: 'monotone_pad_spline',
-      visible: true,
+      visible: false,
       grayLevel: 5,
       midXExpand: 26,
       p2x: 2048,
@@ -184,7 +184,7 @@ export const DEFAULT_PROJECT = {
       trimStart: 0,
       trimEnd: 0,
       strokeWidth: 18,
-      gray: 142,
+      gray: 212,
       fillGray: -1,
       opacity: 1,
       dashLength: 100,
@@ -201,7 +201,7 @@ export const DEFAULT_PROJECT = {
       id: 'layer_monotone_5pad_oval_copy_1792738231984',
       name: '22',
       type: 'monotone_pad_spline',
-      visible: true,
+      visible: false,
       grayLevel: 5,
       midXExpand: 26,
       p2x: 2048,
@@ -217,7 +217,7 @@ export const DEFAULT_PROJECT = {
       trimStart: 0,
       trimEnd: 0,
       strokeWidth: 18,
-      gray: 142,
+      gray: 212,
       fillGray: -1,
       opacity: 1,
       dashLength: 100,
@@ -250,7 +250,7 @@ export const DEFAULT_PROJECT = {
       trimStart: 0,
       trimEnd: 0,
       strokeWidth: 18,
-      gray: 142,
+      gray: 212,
       fillGray: -1,
       opacity: 1,
       dashLength: 100,
@@ -268,46 +268,46 @@ export const DEFAULT_PROJECT = {
       name: '6. 锚点连线示例 (#KO1斜向车位 → #S4小垫, 首尾跳过)',
       type: 'rect_or_line',
       visible: true,
-      grayLevel: 7,
+      grayLevel: 3,
       subMode: 'custom_segment',
       anchor1: 'ko_diag',
-      anchor2: 'pad_sm_1788_2300',
+      anchor2: 'pad_big_corner',
       x1: 2048,
       y1: 2560,
-      x2: 1788,
-      y2: 2300,
+      x2: 3072,
+      y2: 4096,
       trimStart: 85,
       trimEnd: 0,
       strokeWidth: 12,
-      gray: 198,
+      gray: 128,
       fillGray: -1,
       cornerRadius: 0,
       opacity: 1,
-      dashLength: 28,
-      gapLength: 28,
-      dashOffset: 0,
+      dashLength: 120,
+      gapLength: 120,
+      dashOffset: -140,
       lineCap: 'butt',
       cutBySmallPadSafeArea: true,
-      clipXMin: 0,
+      clipXMin: 2144,
       clipXMax: 4096,
       clipYMin: 0,
-      clipYMax: 6000
+      clipYMax: 3888
     },
     {
       id: 'layer_three_point_arc_1792736309032_439',
       name: '7. 三点连线圆弧',
       type: 'three_point_arc',
       visible: true,
-      grayLevel: 6,
+      grayLevel: 3,
       x1: 1792,
       y1: 4184,
-      x2: 940,
-      y2: 3308,
-      x3: 1,
-      y3: 3080,
+      "x2": 940,
+      "y2": 3308,
+      "x3": 1,
+      "y3": 3080,
       fullCircle: true,
       strokeWidth: 20,
-      gray: 170,
+      gray: 128,
       dashLength: 0,
       gapLength: 0,
       lineCap: 'butt',
@@ -336,7 +336,7 @@ export const DEFAULT_PROJECT = {
       trimStart: 0,
       trimEnd: 0,
       strokeWidth: 20,
-      gray: 85,
+      gray: 128,
       fillGray: -1,
       cornerRadius: 0,
       dashLength: 0,
@@ -355,7 +355,7 @@ export const DEFAULT_PROJECT = {
       name: '9. 锚点吸附直线/虚线 (支持首尾跳过)',
       type: 'rect_or_line',
       visible: true,
-      grayLevel: 7,
+      grayLevel: 6,
       subMode: 'custom_segment',
       anchor1: 'ko_back',
       anchor2: 'ko_back',
@@ -366,7 +366,7 @@ export const DEFAULT_PROJECT = {
       trimStart: 0,
       trimEnd: 0,
       strokeWidth: 14,
-      gray: 198,
+      gray: 255,
       fillGray: -1,
       cornerRadius: 0,
       dashLength: 200,
@@ -385,7 +385,7 @@ export const DEFAULT_PROJECT = {
       name: '10. 三点连线圆弧',
       type: 'three_point_arc',
       visible: true,
-      grayLevel: 8,
+      grayLevel: 6,
       x1: 3584,
       y1: 2484,
       x2: 1792,
@@ -394,7 +394,7 @@ export const DEFAULT_PROJECT = {
       y3: 4240,
       fullCircle: false,
       strokeWidth: 20,
-      gray: 227,
+      gray: 255,
       dashLength: 2000,
       gapLength: 500,
       lineCap: 'butt',
@@ -413,7 +413,7 @@ export const DEFAULT_PROJECT = {
       name: '11. 三点连线圆弧',
       type: 'three_point_arc',
       visible: true,
-      grayLevel: 8,
+      grayLevel: 6,
       x1: 3584,
       y1: 2484,
       x2: 2048,
@@ -422,7 +422,7 @@ export const DEFAULT_PROJECT = {
       y3: 0,
       fullCircle: false,
       strokeWidth: 20,
-      gray: 227,
+      gray: 255,
       dashLength: 1000,
       gapLength: 1000,
       lineCap: 'butt',
@@ -441,7 +441,7 @@ export const DEFAULT_PROJECT = {
       name: '14. 三点连线圆弧',
       type: 'three_point_arc',
       visible: true,
-      grayLevel: 9,
+      grayLevel: 5,
       x1: 2048,
       y1: 1036,
       x2: 1788,
@@ -450,7 +450,7 @@ export const DEFAULT_PROJECT = {
       y3: 3308,
       fullCircle: false,
       strokeWidth: 20,
-      gray: 255,
+      gray: 212,
       dashLength: 100,
       gapLength: 120,
       lineCap: 'butt',
@@ -469,8 +469,9 @@ export const DEFAULT_PROJECT = {
 
 export function createNewLayerTemplate(type, index = 1) {
   const id = `layer_${type}_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
-  const defaultLevel = ((index - 1) % 9) + 1;
-  const levelInfo = DEFAULT_GRAY_PALETTE_LEVELS[defaultLevel] || DEFAULT_GRAY_PALETTE_LEVELS[9];
+  const maxActiveLevel = DEFAULT_GRAY_PALETTE_LEVELS.length - 1;
+  const defaultLevel = ((index - 1) % maxActiveLevel) + 1;
+  const levelInfo = DEFAULT_GRAY_PALETTE_LEVELS[defaultLevel] || DEFAULT_GRAY_PALETTE_LEVELS[maxActiveLevel];
   const baseClip = {
     grayLevel: defaultLevel,
     opacity: 1.0,
@@ -651,7 +652,7 @@ export function createNewLayerTemplate(type, index = 1) {
         stripeSpan: 512,
         dutyCycle: 0.5,
         offset: 0,
-        gray: 28,
+        gray: 42,
         clipToFlatFloor: true,
         insetFromFloor: 20,
         ...baseClip,

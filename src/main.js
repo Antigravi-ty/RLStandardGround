@@ -17,7 +17,7 @@ import {
   exportRasterTexture
 } from './exporter.js';
 
-const STORAGE_KEY = 'rl_standard_ground_project_v4';
+const STORAGE_KEY = 'rl_standard_ground_project_v5';
 
 class GroundStudioApp {
   constructor() {
@@ -29,7 +29,7 @@ class GroundStudioApp {
     this.viewMode = 'split'; // 'split' (Q1 + Full) | 'full_only' | 'q1_only'
     this.zoomScale = 1.0;
     this.pickTarget = null; // null | 'p1' | 'p2' | 'p3' | 'center' | 'seg_p1' | 'seg_p2'
-    this.selectedExportPresetId = EXPORT_PRESETS[0].id;
+    this.selectedExportPresetId = EXPORT_PRESETS[1]?.id || EXPORT_PRESETS[0].id; // Default to Q1 2048x3000 proportional
     this.exportFormat = 'image/webp';
     this.exportWithRef = false;
 
@@ -40,20 +40,23 @@ class GroundStudioApp {
   }
 
   ensurePaletteLevels(proj) {
-    if (!proj.colorPalettePreview || !Array.isArray(proj.colorPalettePreview.levels) || proj.colorPalettePreview.levels.length < 10) {
+    if (!proj.colorPalettePreview || !Array.isArray(proj.colorPalettePreview.levels) || proj.colorPalettePreview.levels.length < 2) {
       proj.colorPalettePreview = {
         enabled: proj.colorPalettePreview?.enabled ?? true,
         levels: DEFAULT_GRAY_PALETTE_LEVELS.map(l => ({ ...l }))
       };
     }
-    // Ensure each layer has a valid grayLevel (1..9)
+    const maxLvl = proj.colorPalettePreview.levels.length - 1;
+    // Ensure each layer has a valid grayLevel (1..maxLvl)
     if (Array.isArray(proj.layers)) {
       proj.layers.forEach((layer, idx) => {
         if (layer.grayLevel === undefined || layer.grayLevel === null) {
-          layer.grayLevel = ((idx) % 9) + 1;
+          layer.grayLevel = (idx % maxLvl) + 1;
+        } else if (layer.grayLevel > maxLvl) {
+          layer.grayLevel = maxLvl;
         }
         const lvlObj = proj.colorPalettePreview.levels.find(l => l.level === Number(layer.grayLevel));
-        if (lvlObj && layer.grayLevel >= 1 && layer.grayLevel <= 9) {
+        if (lvlObj && layer.grayLevel >= 1 && layer.grayLevel <= maxLvl) {
           layer.gray = lvlObj.gray;
         }
       });
@@ -119,6 +122,8 @@ class GroundStudioApp {
 
   renderShell() {
     const safeExp = this.project.smallPadSafeExpand ?? 60;
+    const totalLvls = this.project.colorPalettePreview?.levels?.length || 7;
+    const maxLineLvl = totalLvls - 1;
     this.root.innerHTML = `
       <!-- Top Toolbar -->
       <header class="topbar">
@@ -134,7 +139,7 @@ class GroundStudioApp {
           <span style="color:#475569">|</span>
           <label class="checkbox-row" style="background:rgba(16,185,129,0.15);padding:4px 9px;border-radius:6px;border:1px solid #10b981">
             <input type="checkbox" id="chkColorPalettePreview" />
-            <span>🌈 10级分层彩色预览 (L0地面 + L1~L9灰度层)</span>
+            <span>🌈 分层彩色预览 (L0地面 + L1~L${maxLineLvl}高对比度层)</span>
           </label>
           <label class="checkbox-row" style="background:#1e293b;padding:4px 9px;border-radius:6px;border:1px solid #334155">
             <input type="checkbox" id="chkShaderSim" />
@@ -152,7 +157,7 @@ class GroundStudioApp {
 
       <!-- Main 3-Column Workspace -->
       <div class="workspace">
-        <!-- Left Sidebar: 1. Actual Drawn Layer Stack, 2. 10-Level Palette, 3. Small Pad Safe Area, 4. Reference Guides & Canvas -->
+        <!-- Left Sidebar: 1. Actual Drawn Layer Stack, 2. High-Contrast Palette, 3. Small Pad Safe Area, 4. Reference Guides & Canvas -->
         <aside class="sidebar">
           <!-- 1. Parametric Layer Stack (What is ACTUALLY drawn on the texture!) -->
           <div class="panel-section">
@@ -160,7 +165,7 @@ class GroundStudioApp {
               <span>1. ✏️ 实际绘制的贴图图层 (${this.project.layers.length} 层)</span>
             </div>
             <div class="hint-box">
-              每个图层可绑定到 <b>L1 ~ L9 九个灰度层级</b>（连同 L0 地面空余部分共 <b>10 个颜色层级</b>）。每层可直接切换所属层级或 📋 复制 JSON。
+              已精简整合为 <b>L0 地面基底 + L1~L${maxLineLvl} 共 ${totalLvls} 个有效层级</b>（相邻灰度跨度高达 <b>42.5</b>，WebP 导出后极易区分）。每层可直接切换所属层级或勾选显隐。
             </div>
             <div class="field-inline">
               <select id="selNewLayerType" style="flex:1">
@@ -178,14 +183,14 @@ class GroundStudioApp {
             <div class="layer-list" id="layerListContainer"></div>
           </div>
 
-          <!-- 2. 10-Level Grayscale & Color Palette Config -->
+          <!-- 2. High-Contrast Grayscale & Color Palette Config -->
           <div class="panel-section">
             <div class="panel-title">
-              <span>2. 🌈 10级灰度与颜色预览表 (L0地面 + L1~L9)</span>
-              <button class="btn" id="btnResetPalette" style="padding:2px 6px;font-size:10px" title="恢复默认 10 级等分灰度与配色">重置配色</button>
+              <span>2. 🌈 7级高区分度灰度/配色表 (ΔGray≈42.5)</span>
+              <button class="btn" id="btnResetPalette" style="padding:2px 6px;font-size:10px" title="恢复默认 7 级高对比等分灰度 (0, 42, 85, 128, 170, 212, 255)">重置配色</button>
             </div>
             <div class="hint-box" style="border-left-color:#10b981">
-              共 <b>10 个层级</b>：<b>L0</b> 为地面空余基底 (Gray=0)，<b>L1 ~ L9</b> 为 9 个递增灰度等级。勾选上方「10级分层彩色预览」即可用 10 种高对比度颜色直观区分各层！
+              剔除未使用的空档后，<b>L0 (地面=0)</b> 与 <b>L1~L6 (42, 85, 128, 170, 212, 255)</b> 相邻灰度差拉大到 <b>42~43</b>，导出 WebP 后无论是人眼观察还是 Shader 按区间采样都清晰分明！
             </div>
             <div id="paletteLevelsContainer" style="display:flex;flex-direction:column;gap:5px"></div>
           </div>
@@ -789,19 +794,20 @@ class GroundStudioApp {
         turf_stripes: '条纹'
       };
 
-      const curLvl = Number(layer.grayLevel ?? 9);
-      const lvlObj = levels.find(l => l.level === curLvl) || levels[9];
+      const maxLvl = levels.length - 1;
+      const curLvl = Math.min(maxLvl, Math.max(1, Number(layer.grayLevel ?? maxLvl)));
+      const lvlObj = levels.find(l => l.level === curLvl) || levels[maxLvl];
       const swatchColor = lvlObj ? lvlObj.color : '#ffffff';
 
       div.innerHTML = `
         <div class="layer-left">
           <input type="checkbox" class="layer-vis-chk" ${layer.visible ? 'checked' : ''} title="显示/隐藏该图层" />
           <span style="display:inline-block;width:11px;height:11px;border-radius:3px;background:${swatchColor};border:1px solid rgba(255,255,255,0.45);flex-shrink:0" title="当前绑定层级 L${curLvl} (Gray=${lvlObj?.gray ?? layer.gray})"></span>
-          <select class="layer-lvl-select" title="快速切换该图层绑定的灰度/颜色层级 (L1~L9)" style="width:52px;padding:1px 3px;font-size:10px;font-family:monospace;background:#0b1120;color:${swatchColor};border:1px solid #334155;border-radius:4px;flex-shrink:0">
+          <select class="layer-lvl-select" title="快速切换该图层绑定的灰度/颜色层级 (L1~L${maxLvl})" style="width:52px;padding:1px 3px;font-size:10px;font-family:monospace;background:#0b1120;color:${swatchColor};border:1px solid #334155;border-radius:4px;flex-shrink:0">
             ${levels.filter(l => l.level >= 1).map(l => `<option value="${l.level}" ${l.level === curLvl ? 'selected' : ''}>L${l.level}</option>`).join('')}
           </select>
           <span class="layer-type-badge">${badgeMap[layer.type] || layer.type}</span>
-          <span class="layer-name" title="${layer.name}">${layer.name}</span>
+          <span class="layer-name" title="${layer.name}" style="${layer.visible ? '' : 'opacity:0.45;text-decoration:line-through'}">${layer.name}</span>
         </div>
         <div class="layer-actions">
           <button class="icon-btn btn-copy-item" title="复制本层 JSON 参数">📋</button>
@@ -852,6 +858,7 @@ class GroundStudioApp {
       const chk = div.querySelector('.layer-vis-chk');
       chk.onchange = (e) => {
         layer.visible = e.target.checked;
+        this.renderLayerList();
         this.saveAndRenderCanvas();
       };
 
@@ -899,8 +906,9 @@ class GroundStudioApp {
     }
 
     const levels = this.project.colorPalettePreview?.levels || DEFAULT_GRAY_PALETTE_LEVELS;
-    const curLvl = Number(layer.grayLevel ?? 9);
-    const curLvlObj = levels.find(l => l.level === curLvl) || levels[9];
+    const maxLvl = levels.length - 1;
+    const curLvl = Math.min(maxLvl, Math.max(1, Number(layer.grayLevel ?? maxLvl)));
+    const curLvlObj = levels.find(l => l.level === curLvl) || levels[maxLvl];
 
     let html = `
       <div class="field-row">
@@ -908,10 +916,10 @@ class GroundStudioApp {
         <input type="text" id="inspName" value="${layer.name}" />
       </div>
 
-      <!-- 9-Level Grayscale & 10-Color Palette Binding Selector -->
+      <!-- High-Contrast Grayscale & Color Palette Binding Selector -->
       <div style="background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.4);padding:8px;border-radius:6px;display:flex;flex-direction:column;gap:6px">
         <div class="field-label" style="color:#6ee7b7;font-weight:700">
-          <span>🎨 绑定灰度与颜色层级 (L1~L9, 连同 L0 地面共 10 级)</span>
+          <span>🎨 绑定灰度与颜色层级 (L1~L${maxLvl}, 连同 L0 地面共 ${levels.length} 级)</span>
           <span style="font-family:monospace;color:${curLvlObj.color}">L${curLvl} · Gray ${curLvlObj.gray}</span>
         </div>
         <div class="field-inline">
@@ -921,7 +929,7 @@ class GroundStudioApp {
           </select>
           <input type="color" id="colInspLevelColor" value="${curLvlObj.color}" title="直接修改当前绑定层级 L${curLvl} 的预览颜色" style="width:32px;height:26px" />
         </div>
-        <div style="display:grid;grid-template-columns:repeat(9, 1fr);gap:3px">
+        <div style="display:grid;grid-template-columns:repeat(${maxLvl}, 1fr);gap:4px">
           ${levels.filter(l => l.level >= 1).map(l => `
             <button class="btn-quick-lvl" data-lvl="${l.level}" title="点击绑定到 L${l.level} (${l.name}, Gray=${l.gray})" style="background:${l.level === curLvl ? l.color : '#0f172a'};color:${l.level === curLvl ? '#000' : l.color};border:1px solid ${l.color};border-radius:4px;padding:3px 0;font-size:10px;font-family:monospace;font-weight:700;cursor:pointer">
               L${l.level}
@@ -1359,10 +1367,11 @@ class GroundStudioApp {
     bindVal('numTrimStart', 'trimStart', true, layer.type === 'rect_or_line');
     bindVal('numTrimEnd', 'trimEnd', true, layer.type === 'rect_or_line');
 
-    // Bind 9-Level Grayscale & 10-Color Palette controls in Inspector
+    // Bind Grayscale & Color Palette controls in Inspector
     const levels = this.project.colorPalettePreview?.levels || DEFAULT_GRAY_PALETTE_LEVELS;
+    const maxLvl = levels.length - 1;
     const applyLayerLevel = (newLvl) => {
-      const lv = Math.max(1, Math.min(9, parseInt(newLvl, 10) || 1));
+      const lv = Math.max(1, Math.min(maxLvl, parseInt(newLvl, 10) || 1));
       layer.grayLevel = lv;
       const found = levels.find(l => l.level === lv);
       if (found) layer.gray = found.gray;
@@ -1385,7 +1394,7 @@ class GroundStudioApp {
     const colInspLvl = document.getElementById('colInspLevelColor');
     if (colInspLvl) {
       colInspLvl.oninput = (e) => {
-        const curLv = Number(layer.grayLevel ?? 9);
+        const curLv = Number(layer.grayLevel ?? maxLvl);
         const found = levels.find(l => l.level === curLv);
         if (found) {
           found.color = e.target.value;
@@ -1434,7 +1443,7 @@ class GroundStudioApp {
         rng.value = v;
         num.value = v;
         if (lbl) lbl.textContent = customFmt ? customFmt(v) : `${v}${unit}`;
-        if (prop === 'gray' && layer.grayLevel >= 1 && layer.grayLevel <= 9) {
+        if (prop === 'gray' && layer.grayLevel >= 1 && layer.grayLevel <= maxLvl) {
           const found = levels.find(l => l.level === Number(layer.grayLevel));
           if (found) {
             found.gray = Math.max(0, Math.min(255, Math.round(v)));

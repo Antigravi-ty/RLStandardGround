@@ -500,6 +500,7 @@ export function distanceToLayerQ1(layer, px, py) {
 export function resolveLayerGrayAndCss(layerOrLevel, opacity = 1.0, project = null, isShaderPreview = false) {
   const palette = project?.colorPalettePreview;
   const levels = Array.isArray(palette?.levels) ? palette.levels : null;
+  const maxLvl = levels && levels.length > 1 ? levels.length - 1 : 6;
   const usePaletteColors = Boolean(palette?.enabled) && !isShaderPreview;
 
   let levelIdx = null;
@@ -509,10 +510,10 @@ export function resolveLayerGrayAndCss(layerOrLevel, opacity = 1.0, project = nu
     // Direct level index (e.g. 0 for ground base)
     levelIdx = layerOrLevel;
     const found = levels?.find(l => l.level === levelIdx);
-    rawGray = found ? found.gray : (levelIdx === 0 ? (project?.backgroundGray ?? 0) : Math.round((levelIdx / 9) * 255));
+    rawGray = found ? found.gray : (levelIdx === 0 ? (project?.backgroundGray ?? 0) : Math.round((levelIdx / maxLvl) * 255));
   } else if (layerOrLevel && typeof layerOrLevel === 'object') {
-    if (layerOrLevel.grayLevel !== undefined && layerOrLevel.grayLevel !== null && layerOrLevel.grayLevel >= 0 && layerOrLevel.grayLevel <= 9) {
-      levelIdx = Number(layerOrLevel.grayLevel);
+    if (layerOrLevel.grayLevel !== undefined && layerOrLevel.grayLevel !== null && layerOrLevel.grayLevel >= 0) {
+      levelIdx = Math.min(maxLvl, Math.max(0, Number(layerOrLevel.grayLevel)));
       const found = levels?.find(l => l.level === levelIdx);
       rawGray = found ? Number(found.gray) : Number(layerOrLevel.gray ?? 255);
     } else {
