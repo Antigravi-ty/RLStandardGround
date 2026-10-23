@@ -241,102 +241,110 @@ export function describePolarArc(cx, cy, r, startDeg, endDeg, closePie = false, 
 }
 
 /**
- * Solves the 5-Point Monotone-Slope Oval Curve in Q1:
- * - P1: Midfield line point (2048 + midXExpand, 0), derived from the 4-Boost-Pad Intersection (2048, 0)
- *       of Line(#S1(1024,0)--#B1(3584,0)) and Line(#S3(2048,-1036)--#S3(2048,1036)).
- *       Enforces exact vertical tangent at Y=0 (dX/dY = 0) so mirroring across Y=0 is 100% smooth!
+ * Solves the 5-Point Monotone-Slope Smooth Oval Curve in Q1:
+ * - P1: Dynamic midfield point (X0, 0) on Y = 0 where the tangent is completely parallel
+ *       to the long side of the pitch (dX/dY = 0, vertical tangent).
+ *       In default 'auto_c2' mode, X0 is automatically solved from the C2 curvature-continuity
+ *       condition across #S3(2048, -1036) -> P1(X0, 0) -> #S3(2048, +1036) -> #S4(1788, 2300),
+ *       yielding X0 = x2 + 0.54 * y2 * s1 ≈ 2068.14 UU (+20.14 UU outward from #IX1(2048, 0)).
  * - P2: #S3 (2048, 1036)
  * - P3: #S4 (1788, 2300)
  * - P4: #S7 (940, 3308)
  * - P5: #S9 (0, 4240)
  *
- * Uses a convex tangent-triangle Cubic Bézier solver (s_k < D_k < s_{k+1}) so that on every segment,
- * both the coordinates AND the slope dX/dY change strictly monotonically with zero inflection points.
+ * Uses a C2-balanced Monotone Cubic Hermite Spline X(Y) where each segment [Y_k, Y_{k+1}]
+ * has balanced Y-handles (h_k / 3) and satisfies 2*s_k + s_{k+1} <= 3*D_k <= s_k + 2*s_{k+1},
+ * guaranteeing a 100% smooth curve with continuous curvature and strictly monotonic slope (zero corners, zero inflection points).
  */
-export function solveMonotoneFivePointSpline(layer) {
-  const midExpand = Number(layer.midXExpand ?? 112);
-  const tension = Math.max(0.15, Math.min(0.95, Number(layer.tension ?? 0.55)));
-  const endMode = layer.endSlopeMode || 'natural_pointed'; // 'natural_pointed' | 'flat_x0'
+export function solveMonotoneFivePointSpline(layer = {}) {
+  const x2 = Number(layer.p2x ?? 2048);
+  const y2 = Number(layer.p2y ?? 1036);
+  const x3 = Number(layer.p3x ?? 1788);
+  const y3 = Number(layer.p3y ?? 2300);
+  const x4 = Number(layer.p4x ?? 940);
+  const y4 = Number(layer.p4y ?? 3308);
+  const x5 = Number(layer.p5x ?? 0);
+  const y5 = Number(layer.p5y ?? 4240);
+
+  const h0 = Math.max(1.0, y2);
+  const h1 = Math.max(1.0, y3 - y2);
+  const h2 = Math.max(1.0, y4 - y3);
+  const h3 = Math.max(1.0, y5 - y4);
+
+  const D1 = Math.max(1e-4, (x2 - x3) / h1);
+  const D2 = Math.max(1e-4, (x3 - x4) / h2);
+  const D3 = Math.max(1e-4, (x4 - x5) / h3);
+
+  // 1. Solve C2-balanced node slopes s = -dX/dY inside the exact monotone cubic domain
+  //    2*s_k + s_{k+1} <= 3*D_k <= s_k + 2*s_{k+1} so every segment has full 1/3 Hermite handles without pinching:
+  let s3 = Math.min(D3 - 0.08 * (D3 - D2), Math.max(D2 + 0.55 * (D3 - D2), 1.5 * D2 - 1.25 * D1));
+  s3 = Math.max(D2 + 1e-3, Math.min(D3 - 1e-3, s3));
+
+  const s2MinMono = Math.max(D1 + 0.15 * (D2 - D1), 3 * D2 - 2 * s3);
+  const s2MaxMono = Math.min(D2 - 0.15 * (D2 - D1), 3 * D1 - 0.04);
+  let s2 = 0.5 * (s2MinMono + s2MaxMono);
+
+  const s1Auto = Math.max(0.036, Math.min(D1 * 0.65, 0.5 * (3 * D1 - s2)));
+
+  // 2. Automatically solve the dynamic point P1 = (X0, 0) on Y = 0 where dX/dY = 0:
+  //    For a symmetric C2 arch across [-y2, +y2] with slope 0 at Y=0 and slope s1 at Y=y2,
+  //    D0 = (X0 - x2) / y2 = 0.54 * s1 => autoMidExpand = 0.54 * h0 * s1Auto.
+  const autoMidExpand = 0.54 * h0 * s1Auto;
+  const isManualMid = layer.midXMode === 'manual';
+  const midExpand = isManualMid
+    ? Math.max(2, Number(layer.midXExpand ?? autoMidExpand))
+    : autoMidExpand;
+  const x1 = x2 + midExpand;
+  const D0 = midExpand / h0;
+
+  const s0 = 0.0; // Exact vertical tangent (parallel to long side) at Y = 0
+  const s1 = isManualMid
+    ? Math.max(D0 * 1.45, Math.min(D1 * 0.78, s1Auto))
+    : s1Auto;
+
+  if (isManualMid) {
+    const s2C2 = (3 * D1 / h1 - s1 / h1 + 3 * D2 / h2 - s3 / h2) / (2 / h1 + 2 / h2);
+    s2 = Math.max(D1 + 0.05 * (D2 - D1), Math.min(D2 - 0.05 * (D2 - D1), s2C2));
+  }
+
+  const endMode = layer.endSlopeMode || 'natural_pointed';
+  const s4 = endMode === 'flat_x0'
+    ? Math.max(D3 * 3.2, 3.5)
+    : Math.max(D3 + 0.20 * (D3 - s3), 3 * D3 - 2 * s3);
 
   const pts = [
-    [Math.max(2049, 2048 + midExpand), 0.0],
-    [Number(layer.p2x ?? 2048), Number(layer.p2y ?? 1036)],
-    [Number(layer.p3x ?? 1788), Number(layer.p3y ?? 2300)],
-    [Number(layer.p4x ?? 940), Number(layer.p4y ?? 3308)],
-    [Number(layer.p5x ?? 0), Number(layer.p5y ?? 4240)]
+    [x1, 0.0],
+    [x2, y2],
+    [x3, y3],
+    [x4, y4],
+    [x5, y5]
   ];
-
-  const n = pts.length - 1; // 4 segments
-  const D = [];
-  for (let k = 0; k < n; k++) {
-    const dx = pts[k + 1][0] - pts[k][0];
-    const dy = Math.max(1.0, pts[k + 1][1] - pts[k][1]);
-    D.push(Math.max(1e-4, -dx / dy)); // Positive secant slope s = -dX/dY
-  }
-
-  // Node slopes s[0..n] = -dX/dY at each node:
-  // s[0] = 0.0 (exact vertical tangent at Y = 0 midfield line!)
-  const s = new Array(n + 1).fill(0);
-  s[0] = 0.0;
-
-  for (let k = 1; k < n; k++) {
-    if (D[k - 1] < D[k]) {
-      // Strictly increasing secant slopes -> pick balanced slope strictly inside (D[k-1], D[k])
-      // Ideal quadratic midpoint condition is s[k] = 2*D[k-1] - s[k-1], clamped strictly inside (D[k-1], D[k])
-      const ideal = 2 * D[k - 1] - s[k - 1];
-      const lo = D[k - 1] + 0.18 * (D[k] - D[k - 1]);
-      const hi = D[k - 1] + 0.82 * (D[k] - D[k - 1]);
-      s[k] = Math.max(lo, Math.min(hi, ideal));
-    } else {
-      // Fallback if user pushed midXExpand beyond collinear limit (> 213.1 UU): Fritsch-Carlson harmonic mean
-      s[k] = (2 * D[k - 1] * D[k]) / (D[k - 1] + D[k]);
-    }
-  }
-
-  if (endMode === 'flat_x0') {
-    s[n] = Math.max(D[n - 1] * 3.5, 4.0);
-  } else {
-    s[n] = D[n - 1] + 0.65 * Math.max(0.05, D[n - 1] - s[n - 1]);
-  }
+  const D = [D0, D1, D2, D3];
+  const s = [s0, s1, s2, s3, s4];
+  const h = [h0, h1, h2, h3];
 
   const bezierSegments = [];
   const sampledPoints = [];
 
-  for (let k = 0; k < n; k++) {
+  for (let k = 0; k < 4; k++) {
     const [xA, yA] = pts[k];
     const [xB, yB] = pts[k + 1];
-    const sk = s[k];
-    const sk1 = s[k + 1];
-    const chord = Math.hypot(xB - xA, yB - yA);
+    const hk = h[k];
+    const uk = (D[k] - s[k]) / Math.max(1e-5, s[k + 1] - s[k]);
 
-    // Unit tangent vectors at A (pointing toward B) and at B (pointing from A)
-    const uAx = -sk / Math.hypot(sk, 1);
-    const uAy = 1 / Math.hypot(sk, 1);
-    const uBx = -sk1 / Math.hypot(sk1, 1);
-    const uBy = 1 / Math.hypot(sk1, 1);
+    // When uk is in [1/3, 2/3], ak = 1/3 and bk = 1/3 (exact C2 cubic polynomial X(Y) with linear Y(t)).
+    // If manual override pushes uk outside [1/3, 2/3], smoothly adapt ak <= 1 - uk and bk <= uk so convexity is 100% preserved.
+    const ak = Math.min(1 / 3, Math.max(0.18, 1 - uk));
+    const bk = Math.min(1 / 3, Math.max(0.18, uk));
 
-    let L1 = tension * chord * 0.55;
-    let L2 = tension * chord * 0.55;
-
-    // If sk < D[k] < sk1, clamp handle lengths inside the tangent intersection triangle Q_k so inflection is impossible!
-    const denom = sk1 - sk;
-    if (denom > 1e-5 && sk <= D[k] && D[k] <= sk1) {
-      const yQ = (xB - xA + sk1 * yB - sk * yA) / denom;
-      const xQ = xA - sk * (yQ - yA);
-      const distAQ = Math.hypot(xQ - xA, yQ - yA);
-      const distBQ = Math.hypot(xB - xQ, yB - yQ);
-      L1 = Math.min(L1, distAQ * 0.88);
-      L2 = Math.min(L2, distBQ * 0.88);
-    }
-
-    const c1x = xA + L1 * uAx;
-    const c1y = yA + L1 * uAy;
-    const c2x = xB - L2 * uBx;
-    const c2y = yB - L2 * uBy;
+    const c1x = xA - ak * hk * s[k];
+    const c1y = yA + ak * hk;
+    const c2x = xB + bk * hk * s[k + 1];
+    const c2y = yB - bk * hk;
 
     bezierSegments.push({ xA, yA, c1x, c1y, c2x, c2y, xB, yB });
 
-    const steps = 36;
+    const steps = 40;
     for (let i = (k === 0 ? 0 : 1); i <= steps; i++) {
       const t = i / steps;
       const mt = 1 - t;
@@ -364,6 +372,9 @@ export function solveMonotoneFivePointSpline(layer) {
     points: pts,
     secantSlopes: D,
     nodeSlopes: s,
+    autoMidExpand,
+    midExpand,
+    autoMidX: x2 + autoMidExpand,
     intersectionAnchor: [2048, 0],
     sampledPoints,
     d

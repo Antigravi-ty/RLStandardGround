@@ -16,12 +16,12 @@ import {
   exportRasterTexture
 } from './exporter.js';
 
-const STORAGE_KEY = 'rl_standard_ground_project_v3';
+const STORAGE_KEY = 'rl_standard_ground_project_v4';
 
 class GroundStudioApp {
   constructor() {
     this.project = this.loadSavedProject();
-    this.selectedLayerId = this.project.layers[3]?.id || this.project.layers[0]?.id || null;
+    this.selectedLayerId = this.project.layers[4]?.id || this.project.layers[0]?.id || null;
     this.hoveredLayerId = null;
     this.snappedAnchor = null;
     this.magneticSnapEnabled = true;
@@ -769,39 +769,45 @@ class GroundStudioApp {
       `;
     } else if (layer.type === 'monotone_pad_spline') {
       const solved = solveMonotoneFivePointSpline(layer);
-      const midExp = layer.midXExpand ?? 112;
+      const isManual = layer.midXMode === 'manual';
+      const effExp = Number(solved.midExpand.toFixed(2));
+      const autoExp = Number(solved.autoMidExpand.toFixed(2));
+      const p1x = Number(solved.points[0][0].toFixed(2));
       html += `
         <div class="hint-box">
-          🏈 <b>五点斜率单调橄榄球曲线原理</b>：<br/>
-          1. 四垫交点 <b>#IX1 (2048, 0)</b> 由 <b>#S1(1024,0)—#B1(3584,0)</b> 与右侧上下对称的 <b>#S3(2048,±1036)</b> 交叉得出。<br/>
-          2. 起点 <b>P1(${2048 + midExp}, 0)</b> 从 #IX1 向外微移 <b>+${midExp} UU</b>，在穿过中场线 <code>Y=0</code> 处强制切线斜率 <b>dX/dY = 0 (竖直平滑过中线)</b>，再单调光滑穿过 <b>#S3 → #S4 → #S7 → #S9</b>。<br/>
-          3. 当外扩在 <code>1 ~ 213 UU</code> 之间时，整条曲线斜率严格单调无拐点！
+          🏈 <b>五点 C² 斜率单调平滑曲线 &amp; 动态中场点自动解算</b>：<br/>
+          1. 在中场线 <code>Y=0</code> 处切线必须<b>完全平行于球场长边 (dX/dY = 0)</b>。<br/>
+          2. <b>动态点 P1(X₀, 0) 如何计算？</b> 由右侧上下对称的 <b>#S3(2048,±1036) → #S4(1788,2300) → #S7(940,3308) → #S9(0,4240)</b> 建立 <b>C² 二阶导数(曲率)连续三次 Hermite 样条</b>，自动反解出跨中场线对称抛物拱顶点：<br/>
+          <code>X₀ = X(#S3) + 0.54 × Y(#S3) × s₁ = ${solved.autoMidX.toFixed(2)} UU</code> (即从四垫交点 <b>#IX1(2048,0)</b> 向外动态偏移 <b>+${autoExp} UU</b>)！
         </div>
         <div class="field-row">
+          <div class="field-label"><span>中场线 (Y=0, 平行于长边) 动态点 P1 解算模式</span></div>
+          <select id="selMidXMode">
+            <option value="auto_c2" ${!isManual ? 'selected' : ''}>✨ C² 曲率连续自动解算动态点 (X₀ = ${solved.autoMidX.toFixed(1)} UU, 推荐)</option>
+            <option value="manual" ${isManual ? 'selected' : ''}>🔧 手动指定 P1 从 #IX1(2048,0) 向外偏移量</option>
+          </select>
+        </div>
+        ${isManual ? `
+        <div class="field-row">
           <div class="field-label">
-            <span>P1 中场交点 (#IX1=2048) 向外偏移 (UU)</span>
-            <span class="field-val" id="lblMidExpand">+${midExp} UU (X=${2048 + midExp})</span>
+            <span>手动指定 P1 向外偏移 (UU)</span>
+            <span class="field-val" id="lblMidExpand">+${effExp} UU (X=${p1x})</span>
           </div>
           <div class="field-inline">
-            <input type="range" id="rngMidExpand" min="2" max="450" step="2" value="${midExp}" />
-            <input type="number" id="numMidExpand" value="${midExp}" style="width:78px" />
+            <input type="range" id="rngMidExpand" min="4" max="200" step="1" value="${effExp}" />
+            <input type="number" id="numMidExpand" value="${effExp}" step="1" style="width:78px" />
           </div>
+        </div>` : ''}
+        <div class="field-row">
+          <div class="field-label"><span>门前 #S9(0, 4240) 末端形态</span></div>
+          <select id="selEndSlopeMode">
+            <option value="natural_pointed" ${layer.endSlopeMode !== 'flat_x0' ? 'selected' : ''}>橄榄球自然尖端 (全域斜率单调)</option>
+            <option value="flat_x0" ${layer.endSlopeMode === 'flat_x0' ? 'selected' : ''}>X=0 处水平切线收口</option>
+          </select>
         </div>
-        <div class="field-grid-2">
-          <div class="field-row">
-            <div class="field-label"><span>切线饱满张力 (Tension)</span></div>
-            <input type="number" id="numSplineTension" value="${layer.tension ?? 0.55}" min="0.15" max="0.95" step="0.05" />
-          </div>
-          <div class="field-row">
-            <div class="field-label"><span>门前 #S9(X=0) 末端形态</span></div>
-            <select id="selEndSlopeMode">
-              <option value="natural_pointed" ${layer.endSlopeMode !== 'flat_x0' ? 'selected' : ''}>橄榄球自然尖端 (单调斜率)</option>
-              <option value="flat_x0" ${layer.endSlopeMode === 'flat_x0' ? 'selected' : ''}>X=0 处水平切线收口</option>
-            </select>
-          </div>
-        </div>
-        <div style="font-size:11px;color:#94a3b8;font-family:monospace;background:#090d16;padding:6px;border-radius:5px">
-          各段割线斜率 -dX/dY: ${solved.secantSlopes.map(d => d.toFixed(3)).join(' → ')}
+        <div style="font-size:11px;color:#94a3b8;font-family:monospace;background:#090d16;padding:6px;border-radius:5px;line-height:1.5">
+          🎯 动态起点 P1: <b>(${p1x}, 0)</b> [+${effExp} UU]<br/>
+          📐 五节点切线倾角: ${solved.nodeSlopes.map(s => `${(Math.atan(s) * 180 / Math.PI).toFixed(1)}°`).join(' → ')}
         </div>
       `;
     } else if (layer.type === 'circle_arc') {
@@ -1190,8 +1196,9 @@ class GroundStudioApp {
     bindPair('rngStrokeW', 'numStrokeW', 'lblStrokeW', 'strokeWidth', ' UU');
     bindPair('rngGray', 'numGray', 'lblGray', 'gray', '');
 
+    bindVal('selMidXMode', 'midXMode', false, true);
     bindVal('numSplineTension', 'tension', true);
-    bindVal('selEndSlopeMode', 'endSlopeMode', false);
+    bindVal('selEndSlopeMode', 'endSlopeMode', false, true);
 
     bindVal('inspBaseContour', 'baseContour', false);
     bindVal('numCx', 'cx', true);

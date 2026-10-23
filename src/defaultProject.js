@@ -142,10 +142,11 @@ export const DEFAULT_PROJECT = {
     },
     {
       id: 'layer_monotone_5pad_oval',
-      name: '5. 五点斜率单调橄榄球曲线 (#IX1外扩→S3→S4→S7→S9)',
+      name: '5. 五点斜率单调橄榄球平滑曲线 (动态中场点→S3→S4→S7→S9)',
       type: 'monotone_pad_spline',
       visible: true,
-      midXExpand: 112, // Shifts P1 from (2048, 0) to (2160, 0) so P1->#S3(2048,1036) is a smooth curve with dX/dY=0 at Y=0
+      midXMode: 'auto_c2', // 'auto_c2' (C2曲率连续自动解算动态点 X0≈2068.14) | 'manual' (手动微调)
+      midXExpand: 20.14,
       p2x: 2048,
       p2y: 1036,
       p3x: 1788,
@@ -200,6 +201,35 @@ export const DEFAULT_PROJECT = {
       clipXMax: 4096,
       clipYMin: 0,
       clipYMax: 6000
+    },
+    {
+      id: 'layer_ko1_to_s4_dash_copy_1792735301491',
+      name: '6. 锚点连线示例 (#KO1斜向车位 → #S4小垫, 首尾跳过) (副本)',
+      type: 'rect_or_line',
+      visible: true,
+      subMode: 'custom_segment',
+      anchor1: 'ko_diag',
+      anchor2: 'pad_big_corner',
+      x1: 2048,
+      y1: 2560,
+      x2: 3072,
+      y2: 4096,
+      trimStart: 140,
+      trimEnd: 240,
+      strokeWidth: 12,
+      gray: 255,
+      fillGray: -1,
+      cornerRadius: 0,
+      opacity: 1,
+      dashLength: 80,
+      gapLength: 80,
+      dashOffset: 110,
+      lineCap: 'butt',
+      cutBySmallPadSafeArea: true,
+      clipXMin: 0,
+      clipXMax: 4096,
+      clipYMin: 0,
+      clipYMax: 6000
     }
   ]
 };
@@ -221,10 +251,11 @@ export function createNewLayerTemplate(type, index = 1) {
     case 'monotone_pad_spline':
       return {
         id,
-        name: `${index}. 五点斜率单调橄榄球曲线`,
+        name: `${index}. 五点斜率单调橄榄球平滑曲线`,
         type: 'monotone_pad_spline',
         visible: true,
-        midXExpand: 112,
+        midXMode: 'auto_c2',
+        midXExpand: 20.14,
         p2x: 2048,
         p2y: 1036,
         p3x: 1788,
