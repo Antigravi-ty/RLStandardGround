@@ -23,6 +23,203 @@ export function resolvePresetDimensions(project, preset) {
   return { width: targetW, height: targetH, mode: preset.mode };
 }
 
+/**
+ * Automatically distributes grayscale centers [0..255] across all current palette levels (0..N)
+ * to maximize grayscale separation for WebP lossy compression tolerance, and computes
+ * non-overlapping midpoint classification intervals [rangeMin, rangeMax] for each level.
+ */
+export function autoDistributePaletteGrayLevels(levels) {
+  if (!Array.isArray(levels) || levels.length === 0) return [];
+  const total = levels.length;
+  if (total === 1) {
+    levels[0].level = 0;
+    levels[0].gray = 0;
+    return levels;
+  }
+  const maxIdx = total - 1;
+  levels.forEach((lvl, idx) => {
+    lvl.level = idx;
+    lvl.gray = Math.round((idx / maxIdx) * 255);
+  });
+  return computePaletteIntervals(levels);
+}
+
+/**
+ * Computes exact non-overlapping grayscale classification intervals [rangeMin..rangeMax] (0..255)
+ * and normalized float intervals [normMin..normMax] (0.0..1.0) for each level based on midpoints
+ * between adjacent sorted grayscale centers.
+ */
+export function computePaletteIntervals(levels) {
+  if (!Array.isArray(levels) || levels.length === 0) return [];
+  const sorted = [...levels].sort((a, b) => a.gray - b.gray);
+  const n = sorted.length;
+
+  return sorted.map((lvl, i) => {
+    const center = Math.max(0, Math.min(255, Math.round(Number(lvl.gray) || 0)));
+    const prevCenter = i > 0 ? Math.max(0, Math.min(255, Math.round(Number(sorted[i - 1].gray) || 0))) : 0;
+    const nextCenter = i < n - 1 ? Math.max(0, Math.min(255, Math.round(Number(sorted[i + 1].gray) || 0))) : 255;
+
+    const rangeMin = i === 0 ? 0 : Math.floor((prevCenter + center) / 2) + 1;
+    const rangeMax = i === n - 1 ? 255 : Math.floor((center + nextCenter) / 2);
+
+    const toleranceMinus = center - rangeMin;
+    const tolerancePlus = rangeMax - center;
+
+    return {
+      ...lvl,
+      gray: center,
+      normCenter: Number((center / 255).toFixed(4)),
+      rangeMin: Math.min(rangeMin, rangeMax),
+      rangeMax: Math.max(rangeMin, rangeMax),
+      normMin: Number((Math.min(rangeMin, rangeMax) / 255).toFixed(4)),
+      normMax: Number((Math.max(rangeMin, rangeMax) / 255).toFixed(4)),
+      webpToleranceMinus: toleranceMinus,
+      webpTolerancePlus: tolerancePlus
+    };
+  });
+}
+
+/**
+ * Builds the complete machine-readable Texture & Physical Space Manifest JSON object.
+ * Contains:
+ * 1. Physical Space & UV Mapping specification (Q1 bounds, Full Arena bounds, 4-quadrant mirror formulas, key Z=0 / Goal / Pad coordinates)
+ * 2. Export Texture resolution & UU-per-pixel scale
+ * 3. Grayscale Classification Table (Levels 0..N with centerGray, [rangeMin, rangeMax], normalized [0..1] bounds, default color, and bound layers)
+ */
+export function buildTextureManifest(project, {
+  mode = 'q1',
+  width = 2048,
+  height = 3000
+} = {}) {
+  const { w: scopeW, h: scopeH, label: scopeLabel } = getScopeDimensions(project.canvasScope);
+  const rawLevels = project.colorPalettePreview?.levels || [];
+  const computedLevels = computePaletteIntervals(rawLevels);
+
+  const n = computedLevels.length;
+  const minStep = n > 1
+    ? Math.min(...computedLevels.slice(1).map((l, idx) => l.gray - computedLevels[idx].gray))
+    : 255;
+
+  const fullW = scopeW * 2;
+  const fullH = scopeH * 2;
+  const exportedWorldW = mode === 'q1' ? scopeW : fullW;
+  const exportedWorldH = mode === 'q1' ? scopeH : fullH;
+
+  const classificationLevels = computedLevels.map((lvl) => {
+    const allBoundLayers = (project.layers || []).filter(l => Number(l.grayLevel) === lvl.level);
+    const visibleBoundLayers = allBoundLayers.filter(l => l.visible);
+    return {
+      level: lvl.level,
+      key: `L${lvl.level}`,
+      name: lvl.name,
+      role: lvl.level === 0 ? 'ground_empty_base' : 'drawn_geometry_tier',
+      centerGray: lvl.gray,
+      centerNormalized: lvl.normCenter,
+      rangeGray: [lvl.rangeMin, lvl.rangeMax],
+      rangeNormalized: [lvl.normMin, lvl.normMax],
+      webpCompressionToleranceGray: [-lvl.webpToleranceMinus, lvl.webpTolerancePlus],
+      defaultColorHex: lvl.color,
+      activeLayerCount: visibleBoundLayers.length,
+      totalBoundLayerCount: allBoundLayers.length,
+      activeLayers: visibleBoundLayers.map(l => ({
+        id: l.id,
+        name: l.name,
+        type: l.type,
+        strokeWidthUU: l.type === 'boost_pad_group' ? (l.inwardWidth ?? l.strokeWidth ?? 10) : (l.strokeWidth ?? 0)
+      }))
+    };
+  });
+
+  return {
+    schemaVersion: '1.0.0',
+    generator: 'RLStandardGround Studio (1:1 Unreal Units)',
+    generatedAt: new Date().toISOString(),
+    projectName: project.name || 'RLStandardGround Texture',
+
+    textureSpec: {
+      exportMode: mode,
+      exportModeDescription: mode === 'q1'
+        ? 'Single Quadrant Q1 (+X, +Y). Reconstruct full arena via 4-quadrant MirroredRepeat.'
+        : 'Full 4-Quadrant Mirrored Arena (-X..+X, -Y..+Y).',
+      pixelWidth: width,
+      pixelHeight: height,
+      worldWidthUU: exportedWorldW,
+      worldHeightUU: exportedWorldH,
+      uuPerPixelX: Number((exportedWorldW / width).toFixed(4)),
+      uuPerPixelY: Number((exportedWorldH / height).toFixed(4)),
+      recommendedColorSpace: 'Linear / Raw / Non-Color Data (disable sRGB gamma correction when sampling grayscale intervals)'
+    },
+
+    physicalSpaceAndUvMapping: {
+      unit: 'Unreal Units (UU)',
+      canvasScopeId: project.canvasScope,
+      canvasScopeLabel: scopeLabel,
+      quadrantQ1BoundsUU: {
+        xMin: 0,
+        xMax: scopeW,
+        yMin: 0,
+        yMax: scopeH,
+        originCorner: 'Top-Left (u=0, v=0) is Arena Center (X=0, Y=0); Bottom-Right (u=1, v=1) is (+XMax, +YMax).'
+      },
+      fullArenaMirroredBoundsUU: {
+        xMin: -scopeW,
+        xMax: scopeW,
+        yMin: -scopeH,
+        yMax: scopeH,
+        totalWidthUU: fullW,
+        totalLengthUU: fullH
+      },
+      uvMappingFormulas: {
+        fromWorldToQ1Uv: {
+          u: `abs(worldX) / ${scopeW}`,
+          v: `abs(worldY) / ${scopeH}`,
+          samplerWrapMode: 'MirroredRepeat (GL_MIRRORED_REPEAT)'
+        },
+        fromWorldToFullMirrorUv: {
+          u: `(worldX + ${scopeW}) / ${fullW}`,
+          v: `(worldY + ${scopeH}) / ${fullH}`,
+          samplerWrapMode: 'ClampToEdge (GL_CLAMP_TO_EDGE)'
+        }
+      },
+      soccarStandardLandmarksUU: {
+        sideWallX: 4096,
+        backWallY: 5120,
+        goalDepthEndY: 6000,
+        goalMouthHalfWidthX: 892.75,
+        cornerChamfer45Deg: { startX: 4096, startY: 3968, endX: 2944, endY: 5120 },
+        flatFloorZ0Boundary: {
+          sideX: 3840,
+          backY: 4864,
+          goalPostX: 760,
+          goalBackY: 5880
+        },
+        smallPadPickupRadiusUU: 144,
+        smallPadSafeAreaExpandUU: Number(project.smallPadSafeExpand ?? 60),
+        smallPadSafeAreaTotalRadiusUU: 144 + Number(project.smallPadSafeExpand ?? 60),
+        bigPadPickupRadiusUU: 208
+      }
+    },
+
+    grayscaleClassification: {
+      totalLevels: n,
+      groundLevelIndex: 0,
+      activeGeometryLevelsCount: Math.max(0, n - 1),
+      minCenterSeparationGray: minStep,
+      minHalfBandMarginGray: Math.floor(minStep / 2),
+      classificationRule: 'For any sampled pixel grayscale G in [0..255] (or normalized g in [0.0..1.0]), match the level whose rangeGray [min, max] contains G, or find argmin_i |G - level[i].centerGray|.',
+      levels: classificationLevels
+    }
+  };
+}
+
+export function exportManifestJson(project, { mode = 'q1', width = 2048, height = 3000 } = {}) {
+  const manifest = buildTextureManifest(project, { mode, width, height });
+  const blob = new Blob([JSON.stringify(manifest, null, 2)], { type: 'application/json' });
+  const prefix = mode === 'q1' ? 'ground_q1' : 'ground_full';
+  const lvlCount = manifest.grayscaleClassification.totalLevels;
+  downloadBlob(blob, `${prefix}_${lvlCount}levels_${width}x${height}_manifest.json`);
+}
+
 export function downloadBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');

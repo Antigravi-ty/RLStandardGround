@@ -183,14 +183,18 @@ class GroundStudioApp {
             <div class="layer-list" id="layerListContainer"></div>
           </div>
 
-          <!-- 2. High-Contrast Grayscale & Color Palette Config -->
+          <!-- 2. High-Contrast Grayscale & Interval Classification Config -->
           <div class="panel-section">
-            <div class="panel-title">
-              <span>2. 🌈 7级高区分度灰度/配色表 (ΔGray≈42.5)</span>
-              <button class="btn" id="btnResetPalette" style="padding:2px 6px;font-size:10px" title="恢复默认 7 级高对比等分灰度 (0, 42, 85, 128, 170, 212, 255)">重置配色</button>
+            <div class="panel-title" style="flex-wrap:wrap;gap:4px">
+              <span id="lblPalettePanelTitle">2. 🌈 灰度层级与区间分类 (${totalLvls}级)</span>
+              <div style="display:flex;gap:4px;flex-wrap:wrap">
+                <button class="btn btn-emerald" id="btnAddPaletteLevel" style="padding:2px 6px;font-size:10px" title="新增一个灰度分类层级，并自动按最大区分度重排 0~255 中心值">➕ 新增层级</button>
+                <button class="btn btn-primary" id="btnAutoDistributeGray" style="padding:2px 6px;font-size:10px" title="将当前所有层级在 0~255 之间自动均分，使相邻灰度间隔最大化（抗 WebP 压缩损失）">⚡ 最大区分度均分</button>
+                <button class="btn" id="btnResetPalette" style="padding:2px 6px;font-size:10px" title="恢复默认 7 级高对比等分灰度 (0, 42, 85, 128, 170, 212, 255)">↺ 默认7级</button>
+              </div>
             </div>
-            <div class="hint-box" style="border-left-color:#10b981">
-              剔除未使用的空档后，<b>L0 (地面=0)</b> 与 <b>L1~L6 (42, 85, 128, 170, 212, 255)</b> 相邻灰度差拉大到 <b>42~43</b>，导出 WebP 后无论是人眼观察还是 Shader 按区间采样都清晰分明！
+            <div class="hint-box" id="lblPaletteSummaryHint" style="border-left-color:#10b981">
+              自动按层级数量均分 <code>0~255</code> 灰度中心值并计算无重叠判定区间 <code>[Min~Max]</code>，最大化抵抗 WebP 有损压缩偏移。
             </div>
             <div id="paletteLevelsContainer" style="display:flex;flex-direction:column;gap:5px"></div>
           </div>
@@ -310,7 +314,7 @@ class GroundStudioApp {
           </div>
         </main>
 
-        <!-- Right Sidebar: Selected Layer Inspector & Multi-Spec Texture Exporter -->
+        <!-- Right Sidebar: Selected Layer Inspector & Multi-Spec Texture + Manifest Exporter -->
         <aside class="sidebar-right">
           <!-- Selected Layer Inspector -->
           <div class="panel-section" id="inspectorPanel">
@@ -339,7 +343,7 @@ class GroundStudioApp {
           <!-- Export Panel -->
           <div class="panel-section">
             <div class="panel-title">
-              <span>🚀 导出 WebP / PNG / SVG 贴图</span>
+              <span>🚀 导出 WebP 贴图 & Manifest 规范</span>
             </div>
             <div class="field-row">
               <div class="field-label"><span>常用导出规格预设</span></div>
@@ -379,12 +383,27 @@ class GroundStudioApp {
             </label>
             <label class="checkbox-row" style="color:#6ee7b7">
               <input type="checkbox" id="chkExportColorMode" />
-              <span>🌈 导出 10 级彩色预览图 (不勾选则导出 9 级灰度贴图)</span>
+              <span>🌈 导出彩色预览图 (不勾选则导出标准灰度贴图)</span>
             </label>
             <div style="display:flex;flex-direction:column;gap:7px;margin-top:4px">
               <button class="btn btn-emerald" id="btnExportRaster" style="justify-content:center;padding:9px;font-size:13px;font-weight:700">
                 🖼️ 导出光栅贴图 (WebP / PNG)
               </button>
+              <div style="display:flex;gap:6px">
+                <button class="btn btn-primary" id="btnExportManifest" style="flex:1;justify-content:center;padding:8px;font-size:12px;font-weight:700" title="导出包含物理空间尺寸、UV映射公式与各层级灰度中心值/判定区间 [Min~Max] 的 manifest.json">
+                  📋 导出 Manifest.json (灰度区间 + 物理空间)
+                </button>
+                <button class="btn" id="btnToggleManifestPreview" style="padding:8px 10px;font-size:12px" title="在线预览或复制生成的 Manifest JSON">
+                  👁️ 预览
+                </button>
+              </div>
+              <div id="manifestPreviewBox" style="display:none;background:#090d16;border:1px solid #334155;border-radius:6px;padding:8px;margin-top:2px">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+                  <span style="font-size:11px;color:#93c5fd;font-weight:600">📄 Manifest.json (物理空间映射 + 灰度分类区间)</span>
+                  <button class="btn btn-primary" id="btnCopyManifestJson" style="padding:2px 8px;font-size:10px">📋 复制 JSON</button>
+                </div>
+                <textarea id="txtManifestPreview" readonly rows="10" style="width:100%;background:#0f172a;color:#a7f3d0;border:1px solid #334155;border-radius:4px;font-family:monospace;font-size:10px;padding:6px"></textarea>
+              </div>
               <div class="field-grid-2">
                 <button class="btn" id="btnExportSvgQ1" style="justify-content:center">📐 导出 Q1 SVG</button>
                 <button class="btn" id="btnExportSvgFull" style="justify-content:center">📐 导出全场 SVG</button>
@@ -429,17 +448,54 @@ class GroundStudioApp {
       this.saveAndRenderCanvas();
     };
 
+    const syncLayerGraysFromPalette = () => {
+      const levels = this.project.colorPalettePreview?.levels || [];
+      if (levels[0]) {
+        this.project.backgroundGray = levels[0].gray;
+        const rngBg = document.getElementById('rngBgGray');
+        const valBg = document.getElementById('valBgGray');
+        if (rngBg) rngBg.value = levels[0].gray;
+        if (valBg) valBg.textContent = levels[0].gray;
+      }
+      const maxLvl = Math.max(1, levels.length - 1);
+      this.project.layers.forEach((layer) => {
+        if (layer.grayLevel > maxLvl) layer.grayLevel = maxLvl;
+        const lvl = levels.find(x => x.level === Number(layer.grayLevel));
+        if (lvl) layer.gray = lvl.gray;
+      });
+    };
+
+    document.getElementById('btnAddPaletteLevel').onclick = () => {
+      this.ensurePaletteLevels(this.project);
+      const levels = this.project.colorPalettePreview.levels;
+      const newLevelIdx = levels.length;
+      const extraColors = ['#a855f7', '#fb923c', '#2dd4bf', '#f87171', '#60a5fa', '#f472b6', '#a3e635', '#fbbf24'];
+      const pickColor = extraColors[(newLevelIdx - 1) % extraColors.length];
+      levels.push({
+        level: newLevelIdx,
+        name: `L${newLevelIdx} 自定义分类层级 ${newLevelIdx}`,
+        gray: 255,
+        color: pickColor
+      });
+      autoDistributePaletteGrayLevels(levels);
+      syncLayerGraysFromPalette();
+      this.syncAll();
+    };
+
+    document.getElementById('btnAutoDistributeGray').onclick = () => {
+      this.ensurePaletteLevels(this.project);
+      autoDistributePaletteGrayLevels(this.project.colorPalettePreview.levels);
+      syncLayerGraysFromPalette();
+      this.syncAll();
+    };
+
     document.getElementById('btnResetPalette').onclick = () => {
       this.project.colorPalettePreview = {
         enabled: true,
         levels: DEFAULT_GRAY_PALETTE_LEVELS.map(l => ({ ...l }))
       };
       chkPalette.checked = true;
-      this.project.backgroundGray = 0;
-      this.project.layers.forEach((layer) => {
-        const lvl = this.project.colorPalettePreview.levels.find(x => x.level === Number(layer.grayLevel));
-        if (lvl) layer.gray = lvl.gray;
-      });
+      syncLayerGraysFromPalette();
       this.syncAll();
     };
 
@@ -477,7 +533,8 @@ class GroundStudioApp {
         const parsed = JSON.parse(txtJson.value);
         if (parsed && parsed.type) {
           parsed.id = `layer_${parsed.type}_${Date.now()}`;
-          if (parsed.grayLevel === undefined) parsed.grayLevel = 9;
+          const maxLvl = (this.project.colorPalettePreview?.levels?.length || 7) - 1;
+          if (parsed.grayLevel === undefined || parsed.grayLevel > maxLvl) parsed.grayLevel = maxLvl;
           this.project.layers.push(parsed);
           this.selectedLayerId = parsed.id;
           this.syncAll();
@@ -497,6 +554,7 @@ class GroundStudioApp {
       rngSafe.value = val;
       numSafe.value = val;
       valSafe.textContent = `+${val} UU (总 R=${144 + val})`;
+      this.refreshManifestPreviewIfOpen();
       this.saveAndRenderCanvas();
     };
     rngSafe.oninput = (e) => updateSafeExpand(e.target.value);
@@ -535,6 +593,7 @@ class GroundStudioApp {
     selScope.onchange = (e) => {
       this.project.canvasScope = e.target.value;
       this.syncExportPresetInputs();
+      this.refreshManifestPreviewIfOpen();
       this.saveAndRenderCanvas();
     };
 
@@ -641,7 +700,12 @@ class GroundStudioApp {
     selPreset.onchange = (e) => {
       this.selectedExportPresetId = e.target.value;
       this.syncExportPresetInputs();
+      this.refreshManifestPreviewIfOpen();
     };
+
+    document.getElementById('inpExportW').oninput = () => this.refreshManifestPreviewIfOpen();
+    document.getElementById('inpExportH').oninput = () => this.refreshManifestPreviewIfOpen();
+    document.getElementById('selExportMode').onchange = () => this.refreshManifestPreviewIfOpen();
 
     document.getElementById('btnExportRaster').onclick = () => {
       const w = parseInt(document.getElementById('inpExportW').value, 10) || 2048;
@@ -658,6 +722,34 @@ class GroundStudioApp {
         useShaderPreview: Boolean(this.project.shaderPreview.enabled),
         useColorPalettePreview,
         includeReference
+      });
+    };
+
+    document.getElementById('btnExportManifest').onclick = () => {
+      const w = parseInt(document.getElementById('inpExportW').value, 10) || 2048;
+      const h = parseInt(document.getElementById('inpExportH').value, 10) || 3000;
+      const mode = document.getElementById('selExportMode').value;
+      exportManifestJson(this.project, { mode, width: w, height: h });
+    };
+
+    const manifestBox = document.getElementById('manifestPreviewBox');
+    document.getElementById('btnToggleManifestPreview').onclick = () => {
+      const isHidden = manifestBox.style.display === 'none';
+      manifestBox.style.display = isHidden ? 'block' : 'none';
+      if (isHidden) {
+        this.refreshManifestPreviewIfOpen();
+      }
+    };
+
+    const btnCopyManifest = document.getElementById('btnCopyManifestJson');
+    btnCopyManifest.onclick = () => {
+      const txtEl = document.getElementById('txtManifestPreview');
+      if (!txtEl) return;
+      this.refreshManifestPreviewIfOpen();
+      navigator.clipboard.writeText(txtEl.value).then(() => {
+        const orig = btnCopyManifest.innerHTML;
+        btnCopyManifest.innerHTML = '✅ 已复制!';
+        setTimeout(() => { btnCopyManifest.innerHTML = orig; }, 1400);
       });
     };
 
@@ -679,6 +771,17 @@ class GroundStudioApp {
     };
 
     this.syncExportPresetInputs();
+  }
+
+  refreshManifestPreviewIfOpen() {
+    const manifestBox = document.getElementById('manifestPreviewBox');
+    const txtEl = document.getElementById('txtManifestPreview');
+    if (!manifestBox || !txtEl || manifestBox.style.display === 'none') return;
+    const w = parseInt(document.getElementById('inpExportW')?.value, 10) || 2048;
+    const h = parseInt(document.getElementById('inpExportH')?.value, 10) || 3000;
+    const mode = document.getElementById('selExportMode')?.value || 'q1';
+    const manifest = buildTextureManifest(this.project, { mode, width: w, height: h });
+    txtEl.value = JSON.stringify(manifest, null, 2);
   }
 
   syncExportPresetInputs() {
@@ -705,6 +808,7 @@ class GroundStudioApp {
     this.renderPaletteLevels();
     this.renderLayerList();
     this.renderInspector();
+    this.refreshManifestPreviewIfOpen();
     this.saveAndRenderCanvas();
   }
 
@@ -713,37 +817,70 @@ class GroundStudioApp {
     if (!container) return;
     this.ensurePaletteLevels(this.project);
     const levels = this.project.colorPalettePreview.levels;
+    const intervals = computePaletteIntervals(levels);
+    const intervalMap = new Map(intervals.map(item => [item.level, item]));
+
+    const n = intervals.length;
+    const minStep = n > 1
+      ? Math.min(...intervals.slice(1).map((l, idx) => l.gray - intervals[idx].gray))
+      : 255;
+    const halfMargin = Math.floor(minStep / 2);
+
+    const titleEl = document.getElementById('lblPalettePanelTitle');
+    if (titleEl) {
+      titleEl.textContent = `2. 🌈 灰度层级与区间分类 (${n}级, ΔGray≥${minStep})`;
+    }
+    const summaryEl = document.getElementById('lblPaletteSummaryHint');
+    if (summaryEl) {
+      summaryEl.innerHTML = `当前共 <b>${n} 个层级 (L0~L${n - 1})</b>，相邻中心最小间距 <b>${minStep}</b>，WebP 压缩安全容差 <b>±${halfMargin}</b>。下方显示每个层级的<b>中心灰度</b>与自动计算的<b>无重叠判定区间 [Min~Max]</b>。`;
+    }
 
     container.innerHTML = '';
-    levels.forEach((lvlObj) => {
+    levels.forEach((lvlObj, idx) => {
+      const iv = intervalMap.get(lvlObj.level) || {
+        rangeMin: lvlObj.gray,
+        rangeMax: lvlObj.gray,
+        normMin: 0,
+        normMax: 1,
+        webpToleranceMinus: 0,
+        webpTolerancePlus: 0
+      };
       const boundCount = lvlObj.level === 0
-        ? '地面基底'
-        : `${this.project.layers.filter(l => Number(l.grayLevel) === lvlObj.level).length} 图层`;
+        ? '地面'
+        : `${this.project.layers.filter(l => Number(l.grayLevel) === lvlObj.level).length}层`;
 
+      const canDelete = levels.length > 2 && lvlObj.level > 0;
       const row = document.createElement('div');
-      row.style.cssText = 'display:grid;grid-template-columns:36px 1fr 56px 32px 52px;align-items:center;gap:6px;background:#0f172a;border:1px solid #334155;border-radius:5px;padding:4px 6px;font-size:11px';
+      row.style.cssText = 'display:grid;grid-template-columns:34px 1fr 46px 68px 26px 34px 20px;align-items:center;gap:4px;background:#0f172a;border:1px solid #334155;border-radius:5px;padding:4px 5px;font-size:11px';
 
       const grayHex = lvlObj.gray.toString(16).padStart(2, '0');
       const graySwatch = `#${grayHex}${grayHex}${grayHex}`;
 
       row.innerHTML = `
         <span style="font-family:monospace;font-weight:700;color:${lvlObj.color};display:flex;align-items:center;gap:3px">
-          <span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:${graySwatch};border:1px solid #64748b" title="实际灰度 RGB(${lvlObj.gray},${lvlObj.gray},${lvlObj.gray})"></span>
+          <span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:${graySwatch};border:1px solid #64748b" title="中心灰度 RGB(${lvlObj.gray},${lvlObj.gray},${lvlObj.gray})"></span>
           L${lvlObj.level}
         </span>
-        <input type="text" class="inp-lvl-name" value="${lvlObj.name}" style="padding:2px 5px;font-size:11px" />
-        <input type="number" class="inp-lvl-gray" value="${lvlObj.gray}" min="0" max="255" step="1" title="该层级对应的灰度值 (0..255)" style="padding:2px 4px;font-size:11px;text-align:right" />
-        <input type="color" class="inp-lvl-color" value="${lvlObj.color}" title="该层级的预览颜色" style="width:28px;height:22px;padding:0" />
+        <input type="text" class="inp-lvl-name" value="${lvlObj.name}" style="padding:2px 4px;font-size:11px;min-width:0" />
+        <input type="number" class="inp-lvl-gray" value="${lvlObj.gray}" min="0" max="255" step="1" title="中心灰度值 (0..255)" style="padding:2px 3px;font-size:11px;text-align:right;font-family:monospace" />
+        <span class="lvl-interval-badge" style="font-family:monospace;font-size:10px;color:#6ee7b7;background:#064e3b;border:1px solid #059669;border-radius:4px;padding:1px 3px;text-align:center" title="自动判定区间 [${iv.rangeMin}..${iv.rangeMax}] | 归一化 [${iv.normMin}..${iv.normMax}] | WebP容差 [-${iv.webpToleranceMinus}/+${iv.webpTolerancePlus}]">
+          [${iv.rangeMin}~${iv.rangeMax}]
+        </span>
+        <input type="color" class="inp-lvl-color" value="${lvlObj.color}" title="该层级的预览颜色" style="width:24px;height:20px;padding:0" />
         <span style="font-family:monospace;font-size:10px;color:#94a3b8;text-align:right">${boundCount}</span>
+        ${canDelete
+          ? `<button class="icon-btn btn-del-lvl" title="删除 L${lvlObj.level} 并自动重排最大区分度灰度" style="padding:0 3px;font-size:11px;color:#f87171">×</button>`
+          : `<span style="text-align:center;color:#475569;font-size:10px">-</span>`}
       `;
 
       row.querySelector('.inp-lvl-name').oninput = (e) => {
         lvlObj.name = e.target.value;
         this.renderInspector();
+        this.refreshManifestPreviewIfOpen();
         this.saveProject();
       };
 
-      row.querySelector('.inp-lvl-gray').oninput = (e) => {
+      row.querySelector('.inp-lvl-gray').onchange = (e) => {
         const g = Math.max(0, Math.min(255, parseInt(e.target.value, 10) || 0));
         lvlObj.gray = g;
         if (lvlObj.level === 0) {
@@ -759,7 +896,9 @@ class GroundStudioApp {
             }
           });
         }
+        this.renderPaletteLevels();
         this.renderInspector();
+        this.refreshManifestPreviewIfOpen();
         this.saveAndRenderCanvas();
       };
 
@@ -767,8 +906,30 @@ class GroundStudioApp {
         lvlObj.color = e.target.value;
         this.renderLayerList();
         this.renderInspector();
+        this.refreshManifestPreviewIfOpen();
         this.saveAndRenderCanvas();
       };
+
+      const delBtn = row.querySelector('.btn-del-lvl');
+      if (delBtn) {
+        delBtn.onclick = () => {
+          const removedLevel = lvlObj.level;
+          levels.splice(idx, 1);
+          autoDistributePaletteGrayLevels(levels);
+          const maxLvl = Math.max(1, levels.length - 1);
+          this.project.layers.forEach((l) => {
+            if (Number(l.grayLevel) >= removedLevel) {
+              l.grayLevel = Math.max(1, Math.min(maxLvl, Number(l.grayLevel) - 1));
+            }
+            const found = levels.find(x => x.level === Number(l.grayLevel));
+            if (found) l.gray = found.gray;
+          });
+          if (levels[0]) {
+            this.project.backgroundGray = levels[0].gray;
+          }
+          this.syncAll();
+        };
+      }
 
       container.appendChild(row);
     });
