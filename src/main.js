@@ -861,13 +861,13 @@ class GroundStudioApp {
       const graySwatch = `#${grayHex}${grayHex}${grayHex}`;
 
       row.innerHTML = `
-        <span style="font-family:monospace;font-weight:700;color:${lvlObj.color};display:flex;align-items:center;gap:3px">
-          <span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:${graySwatch};border:1px solid #64748b" title="中心灰度 RGB(${lvlObj.gray},${lvlObj.gray},${lvlObj.gray})"></span>
+        <span class="lvl-tag-span" style="font-family:monospace;font-weight:700;color:${lvlObj.color};display:flex;align-items:center;gap:3px">
+          <span class="lvl-gray-swatch" style="display:inline-block;width:9px;height:9px;border-radius:2px;background:${graySwatch};border:1px solid #64748b" title="中心灰度 RGB(${lvlObj.gray},${lvlObj.gray},${lvlObj.gray})"></span>
           L${lvlObj.level}
         </span>
         <input type="text" class="inp-lvl-name" value="${lvlObj.name}" style="padding:2px 4px;font-size:11px;min-width:0" />
         <input type="number" class="inp-lvl-gray" value="${lvlObj.gray}" min="0" max="255" step="1" title="中心灰度值 (0..255)" style="padding:2px 3px;font-size:11px;text-align:right;font-family:monospace" />
-        <span class="lvl-interval-badge" style="font-family:monospace;font-size:10px;color:#6ee7b7;background:#064e3b;border:1px solid #059669;border-radius:4px;padding:1px 3px;text-align:center" title="自动判定区间 [${iv.rangeMin}..${iv.rangeMax}] | 归一化 [${iv.normMin}..${iv.normMax}] | WebP容差 [-${iv.webpToleranceMinus}/+${iv.webpTolerancePlus}]">
+        <span class="lvl-interval-badge" data-lvl="${lvlObj.level}" style="font-family:monospace;font-size:10px;color:#6ee7b7;background:#064e3b;border:1px solid #059669;border-radius:4px;padding:1px 3px;text-align:center" title="自动判定区间 [${iv.rangeMin}..${iv.rangeMax}] | 归一化 [${iv.normMin}..${iv.normMax}] | WebP容差 [-${iv.webpToleranceMinus}/+${iv.webpTolerancePlus}]">
           [${iv.rangeMin}~${iv.rangeMax}]
         </span>
         <input type="color" class="inp-lvl-color" value="${lvlObj.color}" title="该层级的预览颜色" style="width:24px;height:20px;padding:0" />
@@ -879,14 +879,23 @@ class GroundStudioApp {
 
       row.querySelector('.inp-lvl-name').oninput = (e) => {
         lvlObj.name = e.target.value;
-        this.renderInspector();
+        const opt = document.querySelector(`#selInspGrayLevel option[value="${lvlObj.level}"]`);
+        if (opt) {
+          opt.textContent = `L${lvlObj.level} — ${lvlObj.name} (Gray=${lvlObj.gray})`;
+        }
         this.refreshManifestPreviewIfOpen();
         this.saveProject();
       };
 
-      row.querySelector('.inp-lvl-gray').onchange = (e) => {
+      const updatePaletteGrayInPlace = (e) => {
         const g = Math.max(0, Math.min(255, parseInt(e.target.value, 10) || 0));
         lvlObj.gray = g;
+        const hex = g.toString(16).padStart(2, '0');
+        const sw = row.querySelector('.lvl-gray-swatch');
+        if (sw) {
+          sw.style.background = `#${hex}${hex}${hex}`;
+          sw.title = `中心灰度 RGB(${g},${g},${g})`;
+        }
         if (lvlObj.level === 0) {
           this.project.backgroundGray = g;
           const rngBg = document.getElementById('rngBgGray');
@@ -900,11 +909,30 @@ class GroundStudioApp {
             }
           });
         }
-        this.renderPaletteLevels();
-        this.renderInspector();
+        const newIntervals = computePaletteIntervals(levels);
+        const newMap = new Map(newIntervals.map(item => [item.level, item]));
+        container.querySelectorAll('.lvl-interval-badge').forEach((badgeEl) => {
+          const lv = Number(badgeEl.getAttribute('data-lvl'));
+          const item = newMap.get(lv);
+          if (item) {
+            badgeEl.textContent = `[${item.rangeMin}~${item.rangeMax}]`;
+            badgeEl.title = `自动判定区间 [${item.rangeMin}..${item.rangeMax}] | 归一化 [${item.normMin}..${item.normMax}] | WebP容差 [-${item.webpToleranceMinus}/+${item.webpTolerancePlus}]`;
+          }
+        });
+        const selLayer = this.getSelectedLayer();
+        if (selLayer && Number(selLayer.grayLevel) === lvlObj.level) {
+          const rngG = document.getElementById('rngGray');
+          const numG = document.getElementById('numGray');
+          const lblG = document.getElementById('lblGray');
+          if (rngG) rngG.value = g;
+          if (numG) numG.value = g;
+          if (lblG) lblG.textContent = g;
+        }
         this.refreshManifestPreviewIfOpen();
         this.saveAndRenderCanvas();
       };
+
+      row.querySelector('.inp-lvl-gray').oninput = updatePaletteGrayInPlace;
 
       row.querySelector('.inp-lvl-color').oninput = (e) => {
         lvlObj.color = e.target.value;

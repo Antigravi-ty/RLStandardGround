@@ -260,20 +260,32 @@ export function exportSvgFile(project, mode = 'q1', includeReference = false, us
 }
 
 /**
- * Pure-JS RFC 9649 WebP Lossless (VP8L) bitstream encoder with LZ77 Run-Length + Canonical Huffman coding.
- * Guarantees 100% genuine lossless WebP (`VP8L`) output across all browsers (even Safari/WebKit or when
- * browser `canvas.toBlob('image/webp', 1.0)` falls back to lossy `VP8 ` or PNG).
+ * Pure-JS RFC 9649 WebP Lossless (VP8L) bitstream encoder with SUBTRACT_GREEN_TRANSFORM,
+ * LZ77 Run-Length coding, and Canonical Huffman coding.
+ *
+ * Note on WebP Color Space:
+ * The WebP container specification (RFC 9649) does not have a separate "Grayscale" header flag
+ * (unlike PNG color_type=0), so OS/browser file inspectors always report WebP color space as "RGB".
+ * However, with `SUBTRACT_GREEN_TRANSFORM` enabled (`R' = R - G`, `B' = B - G`), for any grayscale
+ * image (`R = G = B`), `R'` and `B'` are identically `0` for every pixel, and `A` is identically `255`.
+ * In VP8L, a Huffman alphabet with only 1 active symbol writes 0 bits per pixel in the bitstream!
+ * Thus, only the single Green/Luminance channel `G` is actually stored on disk (~30 KB for 2048x3000).
  */
-export function encodeLosslessWebpVP8L(rgba, width, height) {
+export function encodeLosslessWebpVP8L(rgba, width, height, { forceGrayscale = false } = {}) {
   const numPixels = width * height;
   const pixels32 = new Uint32Array(numPixels);
-  let allGrayOpaque = true;
   for (let i = 0, p = 0; i < numPixels; i++, p += 4) {
-    const r = rgba[p];
-    const g = rgba[p + 1];
-    const b = rgba[p + 2];
-    const a = rgba[p + 3];
-    if (r !== g || g !== b || a !== 255) allGrayOpaque = false;
+    let r = rgba[p];
+    let g = rgba[p + 1];
+    let b = rgba[p + 2];
+    let a = rgba[p + 3];
+    if (forceGrayscale) {
+      // Force exact R = G = B = G and A = 255 so Wide-Gamut (Display P3) browser canvas color management
+      // never introduces any 1-bit R/G/B channel drift.
+      r = g;
+      b = g;
+      a = 255;
+    }
     pixels32[i] = ((a << 24) | (r << 16) | (g << 8) | b) >>> 0;
   }
 
@@ -399,8 +411,9 @@ export function encodeLosslessWebpVP8L(rgba, width, height) {
     const r = (px >>> 16) & 255;
     const g = (px >>> 8) & 255;
     const b = px & 255;
-    const rSub = allGrayOpaque ? 0 : ((r - g) & 255);
-    const bSub = allGrayOpaque ? 0 : ((b - g) & 255);
+    // SUBTRACT_GREEN_TRANSFORM: R' = (R - G) & 255, B' = (B - G) & 255
+    const rSub = (r - g) & 255;
+    const bSub = (b - g) & 255;
     freqG[g]++;
     freqR[rSub]++;
     freqB[bSub]++;
@@ -442,10 +455,9 @@ export function encodeLosslessWebpVP8L(rgba, width, height) {
   writeBits(0, 1); // alpha_is_used = 0
   writeBits(0, 3); // version = 0
 
-  if (allGrayOpaque) {
-    writeBits(1, 1); // transform present
-    writeBits(2, 2); // SUBTRACT_GREEN_TRANSFORM
-  }
+  // Always write SUBTRACT_GREEN_TRANSFORM (type 2) in header so decoder adds G back to R' and B'
+  writeBits(1, 1); // transform present
+  writeBits(2, 2); // SUBTRACT_GREEN_TRANSFORM
   writeBits(0, 1); // no more transforms
   writeBits(0, 1); // no color cache
   writeBits(0, 1); // no meta huffman
@@ -537,6 +549,22 @@ export function encodeLosslessWebpVP8L(rgba, width, height) {
 }
 
 /**
+ * Normalizes a grayscale Canvas ImageData so every pixel has strictly R = G = B = G and A = 255,
+ * eliminating any Wide-Gamut (Display P3) color management drift before PNG or WebP encoding.
+ */
+function normalizeGrayscaleCanvasPixels(ctx, width, height) {
+  const imgData = ctx.getImageData(0, 0, width, height);
+  const data = imgData.data;
+  for (let p = 0; p < data.length; p += 4) {
+    const g = data[p + 1];
+    data[p] = g;
+    data[p + 2] = g;
+    data[p + 3] = 255;
+  }
+  ctx.putImageData(imgData, 0, 0);
+}
+
+/**
  * Optional post-process on Canvas ImageData: snaps anti-aliased edge pixels in grayscale mode
  * directly to their exact discrete palette grayscale level (or L0 background if below threshold)
  * so every pixel in the exported texture has 0 anti-aliasing intermediate grayscale values.
@@ -550,10 +578,10 @@ function quantizeGrayscaleCanvasPixels(ctx, width, height, project, thresholdNor
     .sort((a, b) => a - b);
   const bgGray = sortedCenters[0] ?? 0;
 
-  // Step 1: Build single-channel luminance map
+  // Step 1: Build single-channel luminance map (using green channel)
   const lum = new Uint8Array(width * height);
   for (let i = 0, p = 0; i < lum.length; i++, p += 4) {
-    lum[i] = data[p];
+    lum[i] = data[p + 1];
   }
 
   // Step 2: For each pixel, find 3x3 local peak to classify its true layer, then threshold coverage
@@ -563,7 +591,14 @@ function quantizeGrayscaleCanvasPixels(ctx, width, height, project, thresholdNor
     for (let x = 0; x < width; x++) {
       const idx = y * width + x;
       const g = lum[idx];
-      if (g <= bgGray) continue;
+      if (g <= bgGray) {
+        const p = idx * 4;
+        data[p] = bgGray;
+        data[p + 1] = bgGray;
+        data[p + 2] = bgGray;
+        data[p + 3] = 255;
+        continue;
+      }
 
       let peak = g;
       const x0 = Math.max(0, x - 1);
@@ -599,20 +634,6 @@ function quantizeGrayscaleCanvasPixels(ctx, width, height, project, thresholdNor
   ctx.putImageData(imgData, 0, 0);
 }
 
-/**
- * Checks whether a Blob produced by `canvas.toBlob(..., 'image/webp', 1.0)` is a genuine
- * Lossless WebP (`VP8L` chunk header at byte offset 12..16).
- */
-async function isLosslessVP8LBlob(blob) {
-  if (!blob || blob.size < 20) return false;
-  const headerBuf = await blob.slice(0, 16).arrayBuffer();
-  const u8 = new Uint8Array(headerBuf);
-  const riff = String.fromCharCode(u8[0], u8[1], u8[2], u8[3]);
-  const webp = String.fromCharCode(u8[8], u8[9], u8[10], u8[11]);
-  const chunk = String.fromCharCode(u8[12], u8[13], u8[14], u8[15]);
-  return riff === 'RIFF' && webp === 'WEBP' && chunk === 'VP8L';
-}
-
 export async function exportRasterTexture(project, {
   mode = 'q1',
   width = 2048,
@@ -634,6 +655,7 @@ export async function exportRasterTexture(project, {
 
   const svgBlob = new Blob([svgStr], { type: 'image/svg+xml;charset=utf-8' });
   const url = URL.createObjectURL(svgBlob);
+  const isPureGrayscale = !useColorPalettePreview && !useShaderPreview;
 
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -645,8 +667,12 @@ export async function exportRasterTexture(project, {
       ctx.drawImage(img, 0, 0, width, height);
       URL.revokeObjectURL(url);
 
-      if (edgeMode === 'quantized_sharp' && !useColorPalettePreview && !useShaderPreview) {
-        quantizeGrayscaleCanvasPixels(ctx, width, height, project, 0.25);
+      if (isPureGrayscale) {
+        if (edgeMode === 'quantized_sharp') {
+          quantizeGrayscaleCanvasPixels(ctx, width, height, project, 0.25);
+        } else {
+          normalizeGrayscaleCanvasPixels(ctx, width, height);
+        }
       }
 
       const ext = format === 'image/webp' ? 'webp' : 'png';
@@ -656,23 +682,14 @@ export async function exportRasterTexture(project, {
       const filename = `${prefix}_${typeTag}_${width}x${height}.${ext}`;
 
       if (format === 'image/webp') {
-        // Request quality = 1.0 (which triggers VP8L lossless in Chromium/Firefox) and verify the VP8L chunk header;
-        // if the browser produced lossy VP8 or fell back to PNG (e.g. Safari), encode directly via our RFC 9649 VP8L encoder.
-        canvas.toBlob(async (nativeBlob) => {
-          try {
-            if (await isLosslessVP8LBlob(nativeBlob)) {
-              downloadBlob(nativeBlob, filename);
-              resolve();
-              return;
-            }
-            const imgData = ctx.getImageData(0, 0, width, height);
-            const vp8lBlob = encodeLosslessWebpVP8L(imgData.data, width, height);
-            downloadBlob(vp8lBlob, filename);
-            resolve();
-          } catch (err) {
-            reject(err);
-          }
-        }, 'image/webp', 1.0);
+        try {
+          const imgData = ctx.getImageData(0, 0, width, height);
+          const vp8lBlob = encodeLosslessWebpVP8L(imgData.data, width, height, { forceGrayscale: isPureGrayscale });
+          downloadBlob(vp8lBlob, filename);
+          resolve();
+        } catch (err) {
+          reject(err);
+        }
         return;
       }
 
