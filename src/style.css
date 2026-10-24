@@ -19,13 +19,15 @@
   padding: 0;
 }
 
-body {
+html, body {
   background: var(--bg-dark);
   color: var(--text-main);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   height: 100vh;
   overflow: hidden;
   user-select: none;
+  overscroll-behavior: none;
+  overscroll-behavior-x: none;
 }
 
 #app {
@@ -33,6 +35,7 @@ body {
   flex-direction: column;
   height: 100vh;
   width: 100vw;
+  overscroll-behavior: none;
 }
 
 /* Header Bar */
@@ -130,6 +133,8 @@ body {
   display: grid;
   grid-template-columns: 330px 1fr 370px;
   overflow: hidden;
+  min-width: 0;
+  min-height: 0;
 }
 
 .sidebar {
@@ -329,6 +334,9 @@ input[type="color"] {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  min-width: 0;
+  min-height: 0;
+  overscroll-behavior: contain;
 }
 
 .viewport-header {
@@ -342,6 +350,7 @@ input[type="color"] {
   font-size: 12px;
   color: var(--text-muted);
   z-index: 5;
+  flex-shrink: 0;
 }
 
 .coord-readout {
@@ -359,18 +368,33 @@ input[type="color"] {
   display: flex;
   overflow: hidden;
   position: relative;
+  min-width: 0;
+  min-height: 0;
+  overscroll-behavior: contain;
 }
 
+/* Use margin: auto on .svg-stage instead of align-items: center on .canvas-pane
+   so when zoomed > 100%, the left & top edges never overflow into negative unscrollable coordinates! */
 .canvas-pane {
   flex: 1;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  justify-content: center;
   padding: 16px;
   overflow: auto;
   position: relative;
   border-right: 1px solid #1e293b;
+  min-width: 0;
+  min-height: 0;
+  overscroll-behavior: contain;
+  cursor: grab;
+}
+
+.canvas-pane.is-panning {
+  cursor: grabbing;
+}
+
+.canvas-pane.is-panning .svg-stage svg {
+  cursor: grabbing;
 }
 
 .canvas-pane:last-child {
@@ -378,9 +402,11 @@ input[type="color"] {
 }
 
 .pane-badge {
-  position: absolute;
-  top: 10px;
-  left: 12px;
+  position: sticky;
+  top: 0;
+  left: 0;
+  align-self: flex-start;
+  margin-bottom: 8px;
   background: rgba(15, 23, 42, 0.88);
   border: 1px solid var(--border);
   padding: 4px 9px;
@@ -389,9 +415,12 @@ input[type="color"] {
   color: #cbd5e1;
   pointer-events: none;
   z-index: 3;
+  flex-shrink: 0;
 }
 
 .svg-stage {
+  margin: auto;
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: center;

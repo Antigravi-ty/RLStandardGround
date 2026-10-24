@@ -3,6 +3,7 @@ import { Q1_NAMED_ANCHORS, ALL_HITBOX_UNION_BOUNDS } from './physicsData.js';
 import {
   solveThreePointArc,
   solveMonotoneFivePointSpline,
+  solveTriangleCone,
   trimLineSegment,
   findNearestAnchor,
   distanceToLayerQ1,
@@ -21,24 +22,36 @@ import {
   exportRasterTexture
 } from './exporter.js';
 
-const STORAGE_KEY = 'rl_standard_ground_project_v6';
+const STORAGE_KEY = 'rl_standard_ground_project_v7';
+const REPO_JSON_HASH_KEY = 'rl_standard_ground_repo_json_hash_v7';
+
+function computeJsonFingerprint(obj) {
+  const str = JSON.stringify(obj);
+  let hash = 5381;
+  for (let i = 0; i < str.length; i++) {
+    hash = ((hash << 5) + hash + str.charCodeAt(i)) | 0;
+  }
+  return `${str.length}_${hash}`;
+}
 
 class GroundStudioApp {
   constructor() {
     this.project = this.loadSavedProject();
-    this.selectedLayerId = this.project.layers[3]?.id || this.project.layers[0]?.id || null;
+    this.selectedLayerId = this.project.layers[9]?.id || this.project.layers[8]?.id || this.project.layers[0]?.id || null;
     this.hoveredLayerId = null;
     this.snappedAnchor = null;
     this.magneticSnapEnabled = true;
     this.viewMode = 'split'; // 'split' (Q1 + Full) | 'full_only' | 'q1_only'
     this.zoomScale = 1.0;
     this.pickTarget = null; // null | 'p1' | 'p2' | 'p3' | 'center' | 'seg_p1' | 'seg_p2'
-    this.selectedExportPresetId = EXPORT_PRESETS[1]?.id || EXPORT_PRESETS[0].id; // Default to Q1 2048x3000 proportional
+    this.selectedExportPresetId = EXPORT_PRESETS[1]?.id || EXPORT_PRESETS[0].id;
     this.exportFormat = 'image/webp';
     this.exportWithRef = false;
+    this.wasPanningDrag = false;
 
     this.root = document.getElementById('app');
     this.renderShell();
+    this.setupPanePanning();
     this.syncAll();
     this.setupDragAndDrop();
   }
@@ -46,12 +59,11 @@ class GroundStudioApp {
   ensurePaletteLevels(proj) {
     if (!proj.colorPalettePreview || !Array.isArray(proj.colorPalettePreview.levels) || proj.colorPalettePreview.levels.length < 2) {
       proj.colorPalettePreview = {
-        enabled: proj.colorPalettePreview?.enabled ?? true,
+        enabled: proj.colorPalettePreview?.enabled ?? false,
         levels: DEFAULT_GRAY_PALETTE_LEVELS.map(l => ({ ...l }))
       };
     }
     const maxLvl = proj.colorPalettePreview.levels.length - 1;
-    // Ensure each layer has a valid grayLevel (1..maxLvl)
     if (Array.isArray(proj.layers)) {
       proj.layers.forEach((layer, idx) => {
         if (layer.grayLevel === undefined || layer.grayLevel === null) {
@@ -69,9 +81,12 @@ class GroundStudioApp {
   }
 
   loadSavedProject() {
+    const repoFingerprint = computeJsonFingerprint(DEFAULT_PROJECT);
     try {
+      const savedRepoFingerprint = localStorage.getItem(REPO_JSON_HASH_KEY);
       const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) {
+      // If `project.json` in the repository was edited/replaced, automatically adopt the new `project.json`!
+      if (raw && savedRepoFingerprint === repoFingerprint) {
         const parsed = JSON.parse(raw);
         if (parsed && Array.isArray(parsed.layers)) {
           return this.ensurePaletteLevels({
@@ -86,10 +101,46 @@ class GroundStudioApp {
           });
         }
       }
+      localStorage.setItem(REPO_JSON_HASH_KEY, repoFingerprint);
     } catch (e) {
       console.warn('Failed to load saved project from localStorage:', e);
     }
     return this.ensurePaletteLevels(JSON.parse(JSON.stringify(DEFAULT_PROJECT)));
+  }
+
+  async reloadFromRepoJsonFile() {
+    try {
+      const resp = await fetch(`./project.json?t=${Date.now()}`, { cache: 'no-store' });
+      if (resp.ok) {
+        const freshJson = await resp.json();
+        if (freshJson && Array.isArray(freshJson.layers)) {
+          this.project = this.ensurePaletteLevels(freshJson);
+          localStorage.setItem(REPO_JSON_HASH_KEY, computeJsonFingerprint(freshJson));
+          this.selectedLayerId = this.project.layers[0]?.id || null;
+          this.syncTopControlsFromProject();
+          this.syncAll();
+          return;
+        }
+      }
+    } catch (e) {
+      console.warn('Fetch ./project.json fallback to bundled DEFAULT_PROJECT:', e);
+    }
+    this.project = this.ensurePaletteLevels(JSON.parse(JSON.stringify(DEFAULT_PROJECT)));
+    this.selectedLayerId = this.project.layers[0]?.id || null;
+    this.syncTopControlsFromProject();
+    this.syncAll();
+  }
+
+  syncTopControlsFromProject() {
+    const safeVal = this.project.smallPadSafeExpand ?? 60;
+    const rngSafe = document.getElementById('rngSafeExpand');
+    const numSafe = document.getElementById('numSafeExpand');
+    const valSafe = document.getElementById('valSafeExpand');
+    if (rngSafe) rngSafe.value = safeVal;
+    if (numSafe) numSafe.value = safeVal;
+    if (valSafe) valSafe.textContent = `+${safeVal} UU (总 R=${144 + safeVal})`;
+    const chkPalette = document.getElementById('chkColorPalettePreview');
+    if (chkPalette) chkPalette.checked = Boolean(this.project.colorPalettePreview?.enabled);
   }
 
   saveProject() {
@@ -126,7 +177,7 @@ class GroundStudioApp {
 
   renderShell() {
     const safeExp = this.project.smallPadSafeExpand ?? 60;
-    const totalLvls = this.project.colorPalettePreview?.levels?.length || 7;
+    const totalLvls = this.project.colorPalettePreview?.levels?.length || 8;
     const maxLineLvl = totalLvls - 1;
     this.root.innerHTML = `
       <!-- Top Toolbar -->
@@ -154,25 +205,26 @@ class GroundStudioApp {
         <div class="toolbar-group">
           <button class="btn" id="btnUploadFile" title="导入 JSON 参数文件或参考 SVG">📂 导入 JSON / SVG</button>
           <input type="file" id="fileInputHidden" accept=".json,.svg" style="display:none" />
-          <button class="btn" id="btnExportJson" title="保存当前所有图层参数为 JSON">💾 导出整套 JSON</button>
-          <button class="btn btn-danger" id="btnResetDefault" title="恢复默认预设">↺ 重置默认</button>
+          <button class="btn btn-primary" id="btnExportJson" title="导出为 project.json，可直接丢入仓库根目录覆盖生效">💾 导出 project.json</button>
+          <button class="btn btn-danger" id="btnResetDefault" title="直接重新读取仓库根目录下的 project.json">🔄 读取仓库 project.json</button>
         </div>
       </header>
 
       <!-- Main 3-Column Workspace -->
       <div class="workspace">
-        <!-- Left Sidebar: 1. Actual Drawn Layer Stack, 2. High-Contrast Palette, 3. Small Pad Safe Area, 4. Reference Guides & Canvas -->
+        <!-- Left Sidebar -->
         <aside class="sidebar">
-          <!-- 1. Parametric Layer Stack (What is ACTUALLY drawn on the texture!) -->
+          <!-- 1. Parametric Layer Stack -->
           <div class="panel-section">
             <div class="panel-title">
-              <span>1. ✏️ 实际绘制的贴图图层 (${this.project.layers.length} 层)</span>
+              <span id="lblLayerStackTitle">1. ✏️ 实际绘制的贴图图层 (${this.project.layers.length} 层)</span>
             </div>
             <div class="hint-box">
-              已精简整合为 <b>L0 地面基底 + L1~L${maxLineLvl} 共 ${totalLvls} 个有效层级</b>（相邻灰度跨度高达 <b>42.5</b>，WebP 导出后极易区分）。每层可直接切换所属层级或勾选显隐。
+              仓库根目录已固定绑定 <code>project.json</code>：导出 <code>project.json</code> 后直接扔进仓库即可生效，无需改代码！
             </div>
             <div class="field-inline">
               <select id="selNewLayerType" style="flex:1">
+                <option value="triangle_cone">+ 🔺 开球至氮气垫三角形有效区 (#KO1→#B2)</option>
                 <option value="rect_or_line">+ 锚点吸附直线/虚线 (含首尾跳过)</option>
                 <option value="monotone_pad_spline">+ 五点斜率单调橄榄球曲线</option>
                 <option value="spawn_marker_group">+ 车辆生成点全碰撞箱四角框</option>
@@ -193,12 +245,12 @@ class GroundStudioApp {
               <span id="lblPalettePanelTitle">2. 🌈 灰度层级与区间分类 (${totalLvls}级)</span>
               <div style="display:flex;gap:4px;flex-wrap:wrap">
                 <button class="btn btn-emerald" id="btnAddPaletteLevel" style="padding:2px 6px;font-size:10px" title="新增一个灰度分类层级，并自动按最大区分度重排 0~255 中心值">➕ 新增层级</button>
-                <button class="btn btn-primary" id="btnAutoDistributeGray" style="padding:2px 6px;font-size:10px" title="将当前所有层级在 0~255 之间自动均分，使相邻灰度间隔最大化（抗 WebP 压缩损失）">⚡ 最大区分度均分</button>
-                <button class="btn" id="btnResetPalette" style="padding:2px 6px;font-size:10px" title="恢复默认 7 级高对比等分灰度 (0, 42, 85, 128, 170, 212, 255)">↺ 默认7级</button>
+                <button class="btn btn-primary" id="btnAutoDistributeGray" style="padding:2px 6px;font-size:10px" title="将当前所有层级在 0~255 之间自动均分，使相邻灰度间隔最大化">⚡ 最大区分度均分</button>
+                <button class="btn" id="btnResetPalette" style="padding:2px 6px;font-size:10px" title="恢复默认高对比等分灰度">↺ 默认配色</button>
               </div>
             </div>
             <div class="hint-box" id="lblPaletteSummaryHint" style="border-left-color:#10b981">
-              自动按层级数量均分 <code>0~255</code> 灰度中心值并计算无重叠判定区间 <code>[Min~Max]</code>，最大化抵抗 WebP 有损压缩偏移。
+              自动按层级数量均分 <code>0~255</code> 灰度中心值并计算无重叠判定区间 <code>[Min~Max]</code>。
             </div>
             <div id="paletteLevelsContainer" style="display:flex;flex-direction:column;gap:5px"></div>
           </div>
@@ -206,11 +258,11 @@ class GroundStudioApp {
           <!-- 3. Global Small Boost Pad Safe Area Config -->
           <div class="panel-section">
             <div class="panel-title">
-              <span>3. 🛡️ Small Boost Pad Safe Area (截断保护区)</span>
+              <span>3. 🛡️ Boost Pad & 虚线 Safe Area (截断保护区)</span>
             </div>
             <div class="field-row">
               <div class="field-label">
-                <span>外扩距离 (Outward Expand UU)</span>
+                <span>小氮气垫 Safe Area 外扩 (Small Pad Expand)</span>
                 <span class="field-val" id="valSafeExpand">+${safeExp} UU (总 R=${144 + safeExp})</span>
               </div>
               <div class="field-inline">
@@ -220,7 +272,7 @@ class GroundStudioApp {
             </div>
             <label class="checkbox-row">
               <input type="checkbox" id="chkRefSafeArea" />
-              <span>🩷 在画布上显示 Safe Area 虚线边界</span>
+              <span>🩷 在画布上显示 Safe Area 虚线边界 (含小垫/大垫/中心虚线保护区)</span>
             </label>
           </div>
 
@@ -296,7 +348,7 @@ class GroundStudioApp {
                 <input type="checkbox" id="chkMagneticSnap" checked />
                 <span>🧲 锚点磁吸</span>
               </label>
-              <span>缩放:</span>
+              <span>缩放 (可按住鼠标拖拽平移):</span>
               <button class="btn" id="btnZoomOut" style="padding:2px 8px">-</button>
               <span id="lblZoom" style="font-family:monospace;min-width:44px;text-align:center">100%</span>
               <button class="btn" id="btnZoomIn" style="padding:2px 8px">+</button>
@@ -307,12 +359,12 @@ class GroundStudioApp {
           <div class="viewport-split" id="viewportSplit">
             <!-- Left Pane: Q1 Editor -->
             <div class="canvas-pane" id="paneQ1">
-              <div class="pane-badge">✏️ 四分之一编辑区 (Q1) — 悬停高亮线条，点击直接选中线条或磁吸拾取锚点</div>
+              <div class="pane-badge">✏️ 四分之一编辑区 (Q1) — 按住左键自由拖拽平移 | 悬停高亮线条，点击直接选中</div>
               <div class="svg-stage" id="stageQ1"></div>
             </div>
             <!-- Right Pane: Full 4x Mirrored Arena Preview -->
             <div class="canvas-pane" id="paneFull">
-              <div class="pane-badge">🔍 完整球场实时 2 次镜像预览 (8192 × 12000 UU)</div>
+              <div class="pane-badge">🔍 完整球场实时 2 次镜像预览 (8192 × 12000 UU) — 按住左键自由拖拽查看左右全场</div>
               <div class="svg-stage" id="stageFull"></div>
             </div>
           </div>
@@ -325,7 +377,7 @@ class GroundStudioApp {
             <div class="panel-title" style="flex-wrap:wrap;gap:6px">
               <span>🛠️ 当前选中图层参数</span>
               <div style="display:flex;gap:4px;flex-wrap:wrap">
-                <button class="btn btn-primary" id="btnCopyLayerJson" style="padding:2px 8px;font-size:11px" title="仅复制当前选中图层的 JSON 参数，方便直接发给助手沟通">📋 复制本层参数</button>
+                <button class="btn btn-primary" id="btnCopyLayerJson" style="padding:2px 8px;font-size:11px" title="仅复制当前选中图层的 JSON 参数">📋 复制本层参数</button>
                 <button class="btn" id="btnToggleLayerJsonBox" style="padding:2px 7px;font-size:11px" title="查看或粘贴单层 JSON">{ } 粘贴/编辑JSON</button>
                 <button class="btn" id="btnDuplicateLayer" style="padding:2px 7px;font-size:11px">复制图层</button>
                 <button class="btn btn-danger" id="btnDeleteLayer" style="padding:2px 7px;font-size:11px">删除</button>
@@ -376,7 +428,7 @@ class GroundStudioApp {
               <div class="field-row">
                 <div class="field-label"><span>图片格式</span></div>
                 <select id="selExportFormat">
-                  <option value="image/webp" selected>WebP (推荐高压缩)</option>
+                  <option value="image/webp" selected>WebP (无损 VP8L 推荐)</option>
                   <option value="image/png">PNG (无损灰度)</option>
                 </select>
               </div>
@@ -421,6 +473,104 @@ class GroundStudioApp {
     this.bindShellEvents();
   }
 
+  /**
+   * Enables smooth click-and-drag panning & Ctrl+Wheel zooming on both canvas panes (#paneQ1 and #paneFull),
+   * and prevents horizontal trackpad scroll from triggering browser Back/Forward history navigation.
+   */
+  setupPanePanning() {
+    for (const paneId of ['paneQ1', 'paneFull']) {
+      const pane = document.getElementById(paneId);
+      if (!pane) continue;
+
+      let isDown = false;
+      let startX = 0;
+      let startY = 0;
+      let startScrollLeft = 0;
+      let startScrollTop = 0;
+
+      pane.addEventListener('mousedown', (e) => {
+        if (e.button !== 0 && e.button !== 1) return;
+        isDown = true;
+        this.wasPanningDrag = false;
+        startX = e.clientX;
+        startY = e.clientY;
+        startScrollLeft = pane.scrollLeft;
+        startScrollTop = pane.scrollTop;
+      });
+
+      window.addEventListener('mousemove', (e) => {
+        if (!isDown) return;
+        const dx = e.clientX - startX;
+        const dy = e.clientY - startY;
+        if (Math.hypot(dx, dy) > 4) {
+          this.wasPanningDrag = true;
+          pane.classList.add('is-panning');
+        }
+        if (this.wasPanningDrag) {
+          e.preventDefault();
+          pane.scrollLeft = startScrollLeft - dx;
+          pane.scrollTop = startScrollTop - dy;
+        }
+      });
+
+      window.addEventListener('mouseup', () => {
+        if (!isDown) return;
+        isDown = false;
+        pane.classList.remove('is-panning');
+        if (this.wasPanningDrag) {
+          setTimeout(() => {
+            this.wasPanningDrag = false;
+          }, 50);
+        }
+      });
+
+      // Prevent browser overscroll navigation on horizontal wheel/trackpad swipe and support Ctrl+Wheel zoom
+      pane.addEventListener('wheel', (e) => {
+        if (e.ctrlKey || e.metaKey) {
+          e.preventDefault();
+          const delta = e.deltaY < 0 ? 0.15 : -0.15;
+          this.setZoomScale(this.zoomScale + delta);
+          return;
+        }
+        // Clamp horizontal scroll at boundaries so browser never triggers Back/Forward gesture
+        const maxLeft = pane.scrollWidth - pane.clientWidth;
+        if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+          if ((pane.scrollLeft <= 0 && e.deltaX < 0) || (pane.scrollLeft >= maxLeft && e.deltaX > 0)) {
+            e.preventDefault();
+          }
+        }
+      }, { passive: false });
+    }
+  }
+
+  setZoomScale(newZoom) {
+    const prevZoom = this.zoomScale;
+    this.zoomScale = Math.max(0.4, Math.min(4.0, Number(newZoom.toFixed(2))));
+    const lblZoom = document.getElementById('lblZoom');
+    if (lblZoom) lblZoom.textContent = `${Math.round(this.zoomScale * 100)}%`;
+
+    // Record relative scroll centers before resizing
+    const paneStates = ['paneQ1', 'paneFull'].map((id) => {
+      const p = document.getElementById(id);
+      if (!p) return null;
+      const rx = p.scrollWidth > p.clientWidth ? (p.scrollLeft + p.clientWidth * 0.5) / p.scrollWidth : 0.5;
+      const ry = p.scrollHeight > p.clientHeight ? (p.scrollTop + p.clientHeight * 0.5) / p.scrollHeight : 0.5;
+      return { p, rx, ry };
+    });
+
+    this.applyZoomToStages();
+
+    // Restore relative scroll center so user can pan equally to both left and right sides
+    paneStates.forEach((st) => {
+      if (!st) return;
+      const { p, rx, ry } = st;
+      const targetRatioX = prevZoom <= 1.0 && this.zoomScale > 1.0 ? 0.5 : rx;
+      const targetRatioY = prevZoom <= 1.0 && this.zoomScale > 1.0 ? 0.5 : ry;
+      p.scrollLeft = Math.max(0, targetRatioX * p.scrollWidth - p.clientWidth * 0.5);
+      p.scrollTop = Math.max(0, targetRatioY * p.scrollHeight - p.clientHeight * 0.5);
+    });
+  }
+
   bindShellEvents() {
     const setView = (mode) => {
       this.viewMode = mode;
@@ -434,7 +584,6 @@ class GroundStudioApp {
       this.magneticSnapEnabled = e.target.checked;
     };
 
-    // 10-Level Color Palette Preview Toggle
     const chkPalette = document.getElementById('chkColorPalettePreview');
     chkPalette.checked = Boolean(this.project.colorPalettePreview?.enabled);
     chkPalette.onchange = (e) => {
@@ -473,7 +622,7 @@ class GroundStudioApp {
       this.ensurePaletteLevels(this.project);
       const levels = this.project.colorPalettePreview.levels;
       const newLevelIdx = levels.length;
-      const extraColors = ['#a855f7', '#fb923c', '#2dd4bf', '#f87171', '#60a5fa', '#f472b6', '#a3e635', '#fbbf24'];
+      const extraColors = ['#fbbf24', '#a855f7', '#fb923c', '#2dd4bf', '#f87171', '#60a5fa', '#f472b6', '#a3e635'];
       const pickColor = extraColors[(newLevelIdx - 1) % extraColors.length];
       levels.push({
         level: newLevelIdx,
@@ -503,7 +652,6 @@ class GroundStudioApp {
       this.syncAll();
     };
 
-    // Single Layer JSON Copy & Paste
     const btnCopyLayer = document.getElementById('btnCopyLayerJson');
     btnCopyLayer.onclick = () => {
       this.copySingleLayerJson(this.getSelectedLayer(), btnCopyLayer);
@@ -537,7 +685,7 @@ class GroundStudioApp {
         const parsed = JSON.parse(txtJson.value);
         if (parsed && parsed.type) {
           parsed.id = `layer_${parsed.type}_${Date.now()}`;
-          const maxLvl = (this.project.colorPalettePreview?.levels?.length || 7) - 1;
+          const maxLvl = (this.project.colorPalettePreview?.levels?.length || 8) - 1;
           if (parsed.grayLevel === undefined || parsed.grayLevel > maxLvl) parsed.grayLevel = maxLvl;
           this.project.layers.push(parsed);
           this.selectedLayerId = parsed.id;
@@ -548,7 +696,6 @@ class GroundStudioApp {
       }
     };
 
-    // Global Small Pad Safe Area Expand controls
     const rngSafe = document.getElementById('rngSafeExpand');
     const numSafe = document.getElementById('numSafeExpand');
     const valSafe = document.getElementById('valSafeExpand');
@@ -564,7 +711,6 @@ class GroundStudioApp {
     rngSafe.oninput = (e) => updateSafeExpand(e.target.value);
     numSafe.oninput = (e) => updateSafeExpand(e.target.value);
 
-    // Shader sim toggle
     const chkShader = document.getElementById('chkShaderSim');
     chkShader.checked = Boolean(this.project.shaderPreview.enabled);
     chkShader.onchange = (e) => {
@@ -591,7 +737,6 @@ class GroundStudioApp {
       this.saveAndRenderCanvas();
     };
 
-    // Canvas Scope & Background Gray
     const selScope = document.getElementById('selCanvasScope');
     selScope.value = this.project.canvasScope;
     selScope.onchange = (e) => {
@@ -615,7 +760,6 @@ class GroundStudioApp {
       this.saveAndRenderCanvas();
     };
 
-    // Reference Overlays
     const bindRefCheck = (id, key) => {
       const el = document.getElementById(id);
       if (!el) return;
@@ -635,7 +779,6 @@ class GroundStudioApp {
     bindRefCheck('chkRefGrid', 'showGrid');
     bindRefCheck('chkRefCustomSvg', 'customSvgVisible');
 
-    // Add Layer
     document.getElementById('btnAddLayer').onclick = () => {
       const type = document.getElementById('selNewLayerType').value;
       const newLayer = createNewLayerTemplate(type, this.project.layers.length + 1);
@@ -646,7 +789,6 @@ class GroundStudioApp {
       this.syncAll();
     };
 
-    // Duplicate & Delete Layer
     document.getElementById('btnDuplicateLayer').onclick = () => {
       const cur = this.getSelectedLayer();
       if (!cur) return;
@@ -669,17 +811,10 @@ class GroundStudioApp {
       }
     };
 
-    // Zoom buttons
-    const applyZoom = (z) => {
-      this.zoomScale = Math.max(0.4, Math.min(4.0, z));
-      document.getElementById('lblZoom').textContent = `${Math.round(this.zoomScale * 100)}%`;
-      this.applyZoomToStages();
-    };
-    document.getElementById('btnZoomOut').onclick = () => applyZoom(this.zoomScale - 0.25);
-    document.getElementById('btnZoomIn').onclick = () => applyZoom(this.zoomScale + 0.25);
-    document.getElementById('btnZoomReset').onclick = () => applyZoom(1.0);
+    document.getElementById('btnZoomOut').onclick = () => this.setZoomScale(this.zoomScale - 0.25);
+    document.getElementById('btnZoomIn').onclick = () => this.setZoomScale(this.zoomScale + 0.25);
+    document.getElementById('btnZoomReset').onclick = () => this.setZoomScale(1.0);
 
-    // Import / Export / Reset
     const fileInput = document.getElementById('fileInputHidden');
     document.getElementById('btnUploadFile').onclick = () => fileInput.click();
     fileInput.onchange = (e) => {
@@ -688,18 +823,8 @@ class GroundStudioApp {
     };
 
     document.getElementById('btnExportJson').onclick = () => exportProjectJson(this.project);
-    document.getElementById('btnResetDefault').onclick = () => {
-      this.project = this.ensurePaletteLevels(JSON.parse(JSON.stringify(DEFAULT_PROJECT)));
-      this.selectedLayerId = this.project.layers[0]?.id || null;
-      const safeVal = this.project.smallPadSafeExpand ?? 60;
-      document.getElementById('rngSafeExpand').value = safeVal;
-      document.getElementById('numSafeExpand').value = safeVal;
-      document.getElementById('valSafeExpand').textContent = `+${safeVal} UU (总 R=${144 + safeVal})`;
-      document.getElementById('chkColorPalettePreview').checked = Boolean(this.project.colorPalettePreview?.enabled);
-      this.syncAll();
-    };
+    document.getElementById('btnResetDefault').onclick = () => this.reloadFromRepoJsonFile();
 
-    // Export Presets
     const selPreset = document.getElementById('selExportPreset');
     selPreset.onchange = (e) => {
       this.selectedExportPresetId = e.target.value;
@@ -836,7 +961,7 @@ class GroundStudioApp {
     }
     const summaryEl = document.getElementById('lblPaletteSummaryHint');
     if (summaryEl) {
-      summaryEl.innerHTML = `当前共 <b>${n} 个层级 (L0~L${n - 1})</b>，相邻中心最小间距 <b>${minStep}</b>，WebP 压缩安全容差 <b>±${halfMargin}</b>。下方显示每个层级的<b>中心灰度</b>与自动计算的<b>无重叠判定区间 [Min~Max]</b>。`;
+      summaryEl.innerHTML = `当前共 <b>${n} 个层级 (L0~L${n - 1})</b>，相邻中心最小间距 <b>${minStep}</b>，容差 <b>±${halfMargin}</b>。下方显示每个层级的<b>中心灰度</b>与<b>无重叠判定区间 [Min~Max]</b>。`;
     }
 
     container.innerHTML = '';
@@ -867,7 +992,7 @@ class GroundStudioApp {
         </span>
         <input type="text" class="inp-lvl-name" value="${lvlObj.name}" style="padding:2px 4px;font-size:11px;min-width:0" />
         <input type="number" class="inp-lvl-gray" value="${lvlObj.gray}" min="0" max="255" step="1" title="中心灰度值 (0..255)" style="padding:2px 3px;font-size:11px;text-align:right;font-family:monospace" />
-        <span class="lvl-interval-badge" data-lvl="${lvlObj.level}" style="font-family:monospace;font-size:10px;color:#6ee7b7;background:#064e3b;border:1px solid #059669;border-radius:4px;padding:1px 3px;text-align:center" title="自动判定区间 [${iv.rangeMin}..${iv.rangeMax}] | 归一化 [${iv.normMin}..${iv.normMax}] | WebP容差 [-${iv.webpToleranceMinus}/+${iv.webpTolerancePlus}]">
+        <span class="lvl-interval-badge" data-lvl="${lvlObj.level}" style="font-family:monospace;font-size:10px;color:#6ee7b7;background:#064e3b;border:1px solid #059669;border-radius:4px;padding:1px 3px;text-align:center" title="自动判定区间 [${iv.rangeMin}..${iv.rangeMax}] | 归一化 [${iv.normMin}..${iv.normMax}]">
           [${iv.rangeMin}~${iv.rangeMax}]
         </span>
         <input type="color" class="inp-lvl-color" value="${lvlObj.color}" title="该层级的预览颜色" style="width:24px;height:20px;padding:0" />
@@ -916,7 +1041,6 @@ class GroundStudioApp {
           const item = newMap.get(lv);
           if (item) {
             badgeEl.textContent = `[${item.rangeMin}~${item.rangeMax}]`;
-            badgeEl.title = `自动判定区间 [${item.rangeMin}..${item.rangeMax}] | 归一化 [${item.normMin}..${item.normMax}] | WebP容差 [-${item.webpToleranceMinus}/+${item.webpTolerancePlus}]`;
           }
         });
         const selLayer = this.getSelectedLayer();
@@ -972,11 +1096,17 @@ class GroundStudioApp {
     container.innerHTML = '';
     const levels = this.project.colorPalettePreview?.levels || DEFAULT_GRAY_PALETTE_LEVELS;
 
+    const stackTitle = document.getElementById('lblLayerStackTitle');
+    if (stackTitle) {
+      stackTitle.textContent = `1. ✏️ 实际绘制的贴图图层 (${this.project.layers.length} 层)`;
+    }
+
     this.project.layers.forEach((layer, idx) => {
       const div = document.createElement('div');
       div.className = `layer-item ${layer.id === this.selectedLayerId ? 'selected' : ''}`;
 
       const badgeMap = {
+        triangle_cone: '三角区',
         contour_offset: '边界线',
         circle_arc: '圆/弧',
         three_point_arc: '三点弧',
@@ -1132,7 +1262,7 @@ class GroundStudioApp {
       </div>
     `;
 
-    // Safe Area Truncation Toggle (applicable to all line/arc/contour/spline/rect layers)
+    // Safe Area Truncation Toggle
     if (layer.type !== 'boost_pad_group' && layer.type !== 'turf_stripes') {
       html += `
         <label class="checkbox-row" style="background:rgba(236,72,153,0.12);border:1px solid rgba(244,114,182,0.4);padding:6px 8px;border-radius:6px">
@@ -1142,14 +1272,15 @@ class GroundStudioApp {
       `;
     }
 
-    // Start / End Distance Trimming (跳过起始距离 / 跳过终止距离) for lines and curves
-    if (['rect_or_line', 'circle_arc', 'three_point_arc', 'monotone_pad_spline', 'contour_offset'].includes(layer.type)) {
+    // Start / End Distance Trimming & Normal Dash Clipping Mode
+    if (['rect_or_line', 'circle_arc', 'three_point_arc', 'monotone_pad_spline', 'contour_offset', 'triangle_cone'].includes(layer.type)) {
       const tStart = layer.trimStart ?? 0;
       const tEnd = layer.trimEnd ?? 0;
+      const clipMode = layer.dashClipMode || 'normal_path';
       html += `
         <div style="background:rgba(59,130,246,0.1);border:1px solid rgba(59,130,246,0.35);padding:8px;border-radius:6px;display:flex;flex-direction:column;gap:6px">
           <div class="field-label" style="color:#93c5fd;font-weight:600">
-            <span>⏭️ 沿线首尾跳过距离 (Start / End Skip UU)</span>
+            <span>⏭️ 沿线首尾跳过距离 & 垂直裁切模式</span>
           </div>
           <div class="field-grid-2">
             <div class="field-row">
@@ -1161,11 +1292,145 @@ class GroundStudioApp {
               <input type="number" id="numTrimEnd" value="${tEnd}" min="0" max="5000" step="10" />
             </div>
           </div>
+          <div class="field-row">
+            <div class="field-label"><span>✂️ 虚线/边界裁切方式 (解决斜线 ClipBox 斜切半截问题)</span></div>
+            <select id="selDashClipMode">
+              <option value="normal_path" ${clipMode === 'normal_path' ? 'selected' : ''}>📐 沿线方向垂直平齐裁切 (Normal Cap, 消除斜切角)</option>
+              <option value="whole_dash" ${clipMode === 'whole_dash' ? 'selected' : ''}>🧱 仅保留完整虚线 (Whole Dash Only, 自动剔除半截虚线)</option>
+              <option value="box_mask" ${clipMode === 'box_mask' ? 'selected' : ''}>⬛ 传统水平/垂直矩形框像素硬裁 (Box Mask)</option>
+            </select>
+          </div>
         </div>
       `;
     }
 
-    if (layer.type === 'contour_offset') {
+    if (layer.type === 'triangle_cone') {
+      const cone = solveTriangleCone(layer);
+      const basePadR = Number(layer.basePadRadius ?? 208);
+      const pct = Number(layer.radiusPercent ?? 100);
+      const targetR = Number((layer.targetRadius ?? ((basePadR * pct) / 100)).toFixed(1));
+      const padSafeExp = Number(layer.targetPadSafeExpand ?? 32);
+      const dashSafeExp = Number(layer.dashSafeExpand ?? 22);
+      const centerSw = Number(layer.centerDashStrokeWidth ?? 30);
+
+      html += `
+        <div class="hint-box" id="hintTriangleCone" style="border-left-color:#fbbf24">
+          🔺 <b>开球至氮气垫三角形有效收集区 (#KO1 → #B2)</b>：<br/>
+          顶点间距 <b>${cone.dist ? cone.dist.toFixed(1) : 0} UU</b> | 目标垫半径 <b>R=${targetR} UU (${pct}%)</b> | 半张角 <b>${cone.halfAngleDeg ? cone.halfAngleDeg.toFixed(2) : 0}°</b>。<br/>
+          支持<b>自动避让中心虚线 Safe Area</b>与<b>氮气垫 Safe Area</b>！
+        </div>
+
+        <div class="field-row">
+          <div class="field-label"><span>三角形渲染样式 (Render Style)</span></div>
+          <select id="selTriRenderStyle">
+            <option value="stroked_sides" ${layer.renderStyle === 'stroked_sides' ? 'selected' : ''}>📐 两侧切线引导边线 (仅画左右两条边线)</option>
+            <option value="stroked_closed" ${layer.renderStyle === 'stroked_closed' ? 'selected' : ''}>🔺 闭合直线底边三角形框</option>
+            <option value="stroked_arc" ${layer.renderStyle === 'stroked_arc' ? 'selected' : ''}>🏹 底部沿垫子圆弧闭合三角形框</option>
+            <option value="filled_zone" ${layer.renderStyle === 'filled_zone' ? 'selected' : ''}>🟨 实心填充有效区域 (Filled Collection Zone)</option>
+            <option value="filled_and_stroked" ${layer.renderStyle === 'filled_and_stroked' ? 'selected' : ''}>✨ 实心填充 + 边界线框</option>
+          </select>
+        </div>
+
+        <div class="field-row">
+          <div class="field-label"><span>起点 P1 吸附锚点 (如 #KO1 斜向开球点)</span></div>
+          <select id="inspLineAnchor1">
+            <option value="custom">-- 自定义起点坐标 --</option>
+            ${Q1_NAMED_ANCHORS.map(a => `<option value="${a.id}" ${(Math.abs(layer.x1 - a.x) < 1 && Math.abs(layer.y1 - a.y) < 1) ? 'selected' : ''}>${a.label}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field-grid-2">
+          <div class="field-row"><div class="field-label"><span>起点 X1 (UU)</span></div><input type="number" id="numRectX1" value="${layer.x1}" step="8" /></div>
+          <div class="field-row"><div class="field-label"><span>起点 Y1 (UU)</span></div><input type="number" id="numRectY1" value="${layer.y1}" step="8" /></div>
+        </div>
+        <button class="btn ${this.pickTarget === 'seg_p1' ? 'active' : ''}" id="btnPickSegP1" style="justify-content:center">
+          🟢 在画布磁吸点选顶点 P1 (#KO1)
+        </button>
+
+        <div class="field-row" style="margin-top:4px">
+          <div class="field-label"><span>终点 P2 目标氮气垫锚点 (如 #B2 底角大垫)</span></div>
+          <select id="inspLineAnchor2">
+            <option value="custom">-- 自定义终点坐标 --</option>
+            ${Q1_NAMED_ANCHORS.map(a => `<option value="${a.id}" ${(Math.abs(layer.x2 - a.x) < 1 && Math.abs(layer.y2 - a.y) < 1) ? 'selected' : ''}>${a.label}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field-grid-2">
+          <div class="field-row"><div class="field-label"><span>终点 X2 (UU)</span></div><input type="number" id="numRectX2" value="${layer.x2}" step="8" /></div>
+          <div class="field-row"><div class="field-label"><span>终点 Y2 (UU)</span></div><input type="number" id="numRectY2" value="${layer.y2}" step="8" /></div>
+        </div>
+        <button class="btn ${this.pickTarget === 'seg_p2' ? 'active' : ''}" id="btnPickSegP2" style="justify-content:center">
+          🟡 在画布磁吸点选目标垫 P2 (#B2)
+        </button>
+
+        <!-- Target Pad Radius Utilization -->
+        <div style="background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.35);padding:8px;border-radius:6px;display:flex;flex-direction:column;gap:6px;margin-top:4px">
+          <div class="field-label" style="color:#fde047;font-weight:700">
+            <span>🎯 目标氮气垫半径利用率 (Pad Radius Utilization)</span>
+            <span id="lblTriTargetR">${pct}% (${targetR} UU)</span>
+          </div>
+          <div class="field-inline">
+            <input type="range" id="rngTriRadiusPct" min="10" max="200" step="5" value="${pct}" />
+            <input type="number" id="numTriTargetR" value="${targetR}" min="10" max="600" step="4" style="width:78px" title="直接输入三角形张开的目标半径 (UU)" />
+          </div>
+          <div class="field-grid-2">
+            <div class="field-row">
+              <div class="field-label"><span>切线连接几何</span></div>
+              <select id="selTriConeMode">
+                <option value="tangent" ${layer.coneMode !== 'chord' ? 'selected' : ''}>圆周相切 (Exact Tangent)</option>
+                <option value="chord" ${layer.coneMode === 'chord' ? 'selected' : ''}>法向直径端点 (Perpendicular)</option>
+              </select>
+            </div>
+            <div class="field-row">
+              <div class="field-label"><span>P1 顶点初始展开半宽 (UU)</span></div>
+              <input type="number" id="numTriApexSpread" value="${layer.apexSpread ?? 0}" min="0" max="300" step="5" />
+            </div>
+          </div>
+          <label class="checkbox-row">
+            <input type="checkbox" id="chkTriCutTargetPad" ${layer.cutByTargetPad !== false ? 'checked' : ''} />
+            <span>✂️ 被目标氮气垫 (#B2) Safe Area 截断</span>
+          </label>
+          <div class="field-row">
+            <div class="field-label">
+              <span>目标垫截断外扩 (基于 R=${basePadR} UU 外扩)</span>
+              <span class="field-val" id="lblTriPadExpand">+${padSafeExp} UU (截断 R=${basePadR + padSafeExp})</span>
+            </div>
+            <div class="field-inline">
+              <input type="range" id="rngTriPadExpand" min="-80" max="200" step="4" value="${padSafeExp}" />
+              <input type="number" id="numTriPadExpand" value="${padSafeExp}" min="-150" max="400" step="4" style="width:74px" />
+            </div>
+          </div>
+        </div>
+
+        <!-- Center Dashed Line Safe Area Isolation -->
+        <div style="background:rgba(236,72,153,0.1);border:1px solid rgba(244,114,182,0.4);padding:8px;border-radius:6px;display:flex;flex-direction:column;gap:6px;margin-top:4px">
+          <div class="field-label" style="color:#f472b6;font-weight:700">
+            <span>🛡️ 中心虚线 Safe Area 隔离区 (把中间虚线隔出来)</span>
+          </div>
+          <label class="checkbox-row">
+            <input type="checkbox" id="chkTriCutDashSafe" ${layer.cutByCenterDashSafeArea !== false ? 'checked' : ''} />
+            <span>✂️ 启用中心虚线 Safe Area 裁切 (三角形自动避让中间虚线)</span>
+          </label>
+          <div class="field-row">
+            <div class="field-label"><span>虚线 Safe Area 形态</span></div>
+            <select id="selTriDashSafeMode">
+              <option value="corridor" ${layer.dashSafeMode === 'corridor' ? 'selected' : ''}>🛣️ 沿中心虚线通长通道隔离 (推荐，整条中轴留出安全走廊)</option>
+              <option value="per_dash_box" ${layer.dashSafeMode === 'per_dash_box' ? 'selected' : ''}>🧱 围绕每一节虚线独立矩形框隔离 (Per-Dash Safe Box)</option>
+              <option value="per_dash_pill" ${layer.dashSafeMode === 'per_dash_pill' ? 'selected' : ''}>💊 围绕每一节虚线独立圆角胶囊隔离 (Per-Dash Pill)</option>
+              <option value="none" ${layer.dashSafeMode === 'none' ? 'selected' : ''}>关闭隔离</option>
+            </select>
+          </div>
+          <div class="field-row">
+            <div class="field-label">
+              <span>虚线 Safe Area 外扩距离 (Expand UU)</span>
+              <span class="field-val" id="lblTriDashExpand">+${dashSafeExp} UU (总通道宽 ${centerSw + dashSafeExp * 2} UU)</span>
+            </div>
+            <div class="field-inline">
+              <input type="range" id="rngTriDashExpand" min="0" max="150" step="2" value="${dashSafeExp}" />
+              <input type="number" id="numTriDashExpand" value="${dashSafeExp}" min="0" max="300" step="2" style="width:74px" />
+            </div>
+          </div>
+        </div>
+      `;
+    } else if (layer.type === 'contour_offset') {
       html += `
         <div class="field-row">
           <div class="field-label"><span>基准轮廓线 (Base Contour)</span></div>
@@ -1200,8 +1465,7 @@ class GroundStudioApp {
         <div class="hint-box">
           🏈 <b>五点斜率单调橄榄球曲线原理</b>：<br/>
           1. 四垫交点 <b>#IX1 (2048, 0)</b> 由 <b>#S1(1024,0)—#B1(3584,0)</b> 与右侧上下对称的 <b>#S3(2048,±1036)</b> 交叉得出。<br/>
-          2. 起点 <b>P1(${2048 + midExp}, 0)</b> 从 #IX1 向外微移 <b>+${midExp} UU</b>，在穿过中场线 <code>Y=0</code> 处强制切线斜率 <b>dX/dY = 0 (竖直平滑过中线)</b>，再单调光滑穿过 <b>#S3 → #S4 → #S7 → #S9</b>。<br/>
-          3. 当外扩在 <code>1 ~ 213 UU</code> 之间时，整条曲线斜率严格单调无拐点！
+          2. 起点 <b>P1(${2048 + midExp}, 0)</b> 从 #IX1 向外微移 <b>+${midExp} UU</b>，在穿过中场线 <code>Y=0</code> 处强制切线斜率 <b>dX/dY = 0 (竖直平滑过中线)</b>，再单调光滑穿过 <b>#S3 → #S4 → #S7 → #S9</b>。
         </div>
         <div class="field-row">
           <div class="field-label">
@@ -1281,7 +1545,7 @@ class GroundStudioApp {
         Boolean(layer.fullCircle)
       );
       html += `
-        <div class="hint-box">
+        <div class="hint-box" id="hintThreePointArc">
           📐 <b>三点定圆弧解算结果</b>：<br/>
           ${solved.collinear ? '三点共线 (已退化为直线段)' : `圆心: (${Math.round(solved.cx)}, ${Math.round(solved.cy)}) UU | 半径 R = <b>${solved.r.toFixed(1)} UU</b>`}
         </div>
@@ -1326,7 +1590,7 @@ class GroundStudioApp {
           </select>
         </div>
 
-        <div class="hint-box">
+        <div class="hint-box" id="hintRectLineDist">
           📏 <b>两点总间距</b>: <b>${totalDist.toFixed(1)} UU</b> | 扣除首尾跳过后<b>实际绘制长度</b>: <b>${trimmed.drawnLen.toFixed(1)} UU</b>
         </div>
 
@@ -1364,7 +1628,7 @@ class GroundStudioApp {
       const inW = layer.inwardWidth ?? layer.strokeWidth ?? 10;
       const inOff = layer.insetFromPickup ?? 0;
       html += `
-        <div class="hint-box">
+        <div class="hint-box" id="hintBoostPadRing">
           💡 <b>向内收环模式</b>：大垫子判定圆 <b>R=208</b> (绘制 <b>${208 - inOff - inW}~${208 - inOff} UU</b>)，小垫子判定圆 <b>R=144</b> (绘制 <b>${144 - inOff - inW}~${144 - inOff} UU</b>)。
         </div>
         <div class="field-row">
@@ -1397,7 +1661,7 @@ class GroundStudioApp {
       html += `
         <div class="hint-box">
           🚗 <b>全车型碰撞箱最小外接矩形 (Union AABB)</b>：<br/>
-          综合全部 7 种碰撞箱（Plank 最宽 <code>87.17 UU</code> &amp; 车尾最靠后 <code>-56.65 UU</code>；Breakout 车头最靠前 <code>+79.50 UU</code>），最小外接矩形尺寸为 <b>136.15 × 87.17 UU</b>，仅在四个角留出折角标线！
+          综合全部 7 种碰撞箱，最小外接矩形尺寸为 <b>136.15 × 87.17 UU</b>，仅在四个角留出折角标线！
         </div>
         <div class="field-row">
           <div class="field-label"><span>目标生成点位置</span></div>
@@ -1488,11 +1752,11 @@ class GroundStudioApp {
           <div class="field-grid-2">
             <div class="field-row">
               <div class="field-label"><span>虚线实长 (Dash UU, 0=实线)</span></div>
-              <input type="number" id="numDashLen" value="${layer.dashLength || 0}" min="0" max="1000" step="5" />
+              <input type="number" id="numDashLen" value="${layer.dashLength || 0}" min="0" max="3000" step="5" />
             </div>
             <div class="field-row">
               <div class="field-label"><span>虚线空隙 (Gap UU)</span></div>
-              <input type="number" id="numGapLen" value="${layer.gapLength || 0}" min="0" max="1000" step="5" />
+              <input type="number" id="numGapLen" value="${layer.gapLength || 0}" min="0" max="3000" step="5" />
             </div>
           </div>
           <div class="field-row">
@@ -1524,7 +1788,7 @@ class GroundStudioApp {
     // Rectangular Clipping Region
     html += `
       <div style="border-top:1px solid #334155;margin-top:6px;padding-top:8px">
-        <div class="field-label" style="margin-bottom:6px;color:#93c5fd">✂️ 矩形裁剪区域 (Clip Box — 超出此范围自动截断)</div>
+        <div class="field-label" style="margin-bottom:6px;color:#93c5fd">✂️ 矩形裁剪区域 (Clip Box — 配合上方「沿线垂直裁切」不产生斜切角)</div>
         <div class="field-grid-2">
           <div class="field-row"><div class="field-label"><span>Clip X Min</span></div><input type="number" id="numClipXMin" value="${layer.clipXMin ?? 0}" step="32" /></div>
           <div class="field-row"><div class="field-label"><span>Clip X Max</span></div><input type="number" id="numClipXMax" value="${layer.clipXMax ?? 4096}" step="32" /></div>
@@ -1546,6 +1810,39 @@ class GroundStudioApp {
       }
     };
 
+    const updateInspectorDynamicHints = () => {
+      if (layer.type === 'rect_or_line') {
+        const hintEl = document.getElementById('hintRectLineDist');
+        if (hintEl) {
+          const totalDist = Math.hypot((Number(layer.x2) || 0) - (Number(layer.x1) || 0), (Number(layer.y2) || 0) - (Number(layer.y1) || 0));
+          const trimmed = trimLineSegment(
+            Number(layer.x1) || 0, Number(layer.y1) || 0,
+            Number(layer.x2) || 0, Number(layer.y2) || 0,
+            layer.trimStart, layer.trimEnd
+          );
+          hintEl.innerHTML = `📏 <b>两点总间距</b>: <b>${totalDist.toFixed(1)} UU</b> | 扣除首尾跳过后<b>实际绘制长度</b>: <b>${trimmed.drawnLen.toFixed(1)} UU</b>`;
+        }
+      } else if (layer.type === 'three_point_arc') {
+        const hintEl = document.getElementById('hintThreePointArc');
+        if (hintEl) {
+          const solved = solveThreePointArc(
+            Number(layer.x1) || 0, Number(layer.y1) || 0,
+            Number(layer.x2) || 0, Number(layer.y2) || 0,
+            Number(layer.x3) || 0, Number(layer.y3) || 0,
+            Boolean(layer.fullCircle)
+          );
+          hintEl.innerHTML = `📐 <b>三点定圆弧解算结果</b>：<br/>${solved.collinear ? '三点共线 (已退化为直线段)' : `圆心: (${Math.round(solved.cx)}, ${Math.round(solved.cy)}) UU | 半径 R = <b>${solved.r.toFixed(1)} UU</b>`}`;
+        }
+      } else if (layer.type === 'triangle_cone') {
+        const hintEl = document.getElementById('hintTriangleCone');
+        if (hintEl) {
+          const cone = solveTriangleCone(layer);
+          const pct = Number(layer.radiusPercent ?? 100);
+          hintEl.innerHTML = `🔺 <b>开球至氮气垫三角形有效收集区 (#KO1 → #B2)</b>：<br/>顶点间距 <b>${cone.dist ? cone.dist.toFixed(1) : 0} UU</b> | 目标垫半径 <b>R=${cone.targetR ? cone.targetR.toFixed(1) : 208} UU (${pct}%)</b> | 半张角 <b>${cone.halfAngleDeg ? cone.halfAngleDeg.toFixed(2) : 0}°</b>。`;
+        }
+      }
+    };
+
     const bindVal = (id, prop, isNum = true, rerenderInspector = false) => {
       const el = document.getElementById(id);
       if (!el) return;
@@ -1553,14 +1850,70 @@ class GroundStudioApp {
         layer[prop] = isNum ? parseFloat(e.target.value) || 0 : e.target.value;
         if (prop === 'name') this.renderLayerList();
         syncJsonBox();
+        updateInspectorDynamicHints();
         if (rerenderInspector) this.renderInspector();
         this.saveAndRenderCanvas();
       };
     };
 
     bindVal('inspName', 'name', false);
-    bindVal('numTrimStart', 'trimStart', true, layer.type === 'rect_or_line');
-    bindVal('numTrimEnd', 'trimEnd', true, layer.type === 'rect_or_line');
+    bindVal('numTrimStart', 'trimStart', true);
+    bindVal('numTrimEnd', 'trimEnd', true);
+    bindVal('selDashClipMode', 'dashClipMode', false);
+
+    // Triangle Cone specific events
+    bindVal('selTriRenderStyle', 'renderStyle', false);
+    bindVal('selTriConeMode', 'coneMode', false);
+    bindVal('numTriApexSpread', 'apexSpread', true);
+    bindVal('selTriDashSafeMode', 'dashSafeMode', false);
+
+    const rngTriPct = document.getElementById('rngTriRadiusPct');
+    const numTriR = document.getElementById('numTriTargetR');
+    const lblTriR = document.getElementById('lblTriTargetR');
+    if (rngTriPct && numTriR) {
+      rngTriPct.oninput = (e) => {
+        const pct = parseFloat(e.target.value) || 100;
+        const baseR = Number(layer.basePadRadius ?? 208);
+        const r = Number(((baseR * pct) / 100).toFixed(1));
+        layer.radiusPercent = pct;
+        layer.targetRadius = r;
+        numTriR.value = r;
+        if (lblTriR) lblTriR.textContent = `${pct}% (${r} UU)`;
+        syncJsonBox();
+        updateInspectorDynamicHints();
+        this.saveAndRenderCanvas();
+      };
+      numTriR.oninput = (e) => {
+        const r = Math.max(2, parseFloat(e.target.value) || 208);
+        const baseR = Math.max(1, Number(layer.basePadRadius ?? 208));
+        const pct = Number(((r / baseR) * 100).toFixed(1));
+        layer.targetRadius = r;
+        layer.radiusPercent = pct;
+        rngTriPct.value = Math.min(200, Math.max(10, pct));
+        if (lblTriR) lblTriR.textContent = `${pct}% (${r} UU)`;
+        syncJsonBox();
+        updateInspectorDynamicHints();
+        this.saveAndRenderCanvas();
+      };
+    }
+
+    const chkTriPad = document.getElementById('chkTriCutTargetPad');
+    if (chkTriPad) {
+      chkTriPad.onchange = (e) => {
+        layer.cutByTargetPad = e.target.checked;
+        syncJsonBox();
+        this.saveAndRenderCanvas();
+      };
+    }
+
+    const chkTriDashSafe = document.getElementById('chkTriCutDashSafe');
+    if (chkTriDashSafe) {
+      chkTriDashSafe.onchange = (e) => {
+        layer.cutByCenterDashSafeArea = e.target.checked;
+        syncJsonBox();
+        this.saveAndRenderCanvas();
+      };
+    }
 
     // Bind Grayscale & Color Palette controls in Inspector
     const levels = this.project.colorPalettePreview?.levels || DEFAULT_GRAY_PALETTE_LEVELS;
@@ -1646,6 +1999,7 @@ class GroundStudioApp {
           }
         }
         syncJsonBox();
+        updateInspectorDynamicHints();
         if (rerender) this.renderInspector();
         this.saveAndRenderCanvas();
       };
@@ -1654,12 +2008,14 @@ class GroundStudioApp {
     };
 
     bindPair('rngInsetDist', 'numInsetDist', 'lblInsetDist', 'insetDist', ' UU');
-    bindPair('rngMidExpand', 'numMidExpand', 'lblMidExpand', 'midXExpand', ' UU', true, (v) => `+${v} UU (X=${2048 + v})`);
+    bindPair('rngMidExpand', 'numMidExpand', 'lblMidExpand', 'midXExpand', ' UU', false, (v) => `+${v} UU (X=${2048 + v})`);
     bindPair('rngRadius', 'numRadius', 'lblRadius', 'radius', ' UU');
-    bindPair('rngInwardW', 'numInwardW', 'lblInwardW', 'inwardWidth', ' UU', true);
+    bindPair('rngInwardW', 'numInwardW', 'lblInwardW', 'inwardWidth', ' UU', false);
     bindPair('rngCornerLen', 'numCornerLen', 'lblCornerLen', 'cornerLength', ' UU');
     bindPair('rngStrokeW', 'numStrokeW', 'lblStrokeW', 'strokeWidth', ' UU');
     bindPair('rngGray', 'numGray', 'lblGray', 'gray', '');
+    bindPair('rngTriPadExpand', 'numTriPadExpand', 'lblTriPadExpand', 'targetPadSafeExpand', ' UU', false, (v) => `+${v} UU (截断 R=${(layer.basePadRadius ?? 208) + v})`);
+    bindPair('rngTriDashExpand', 'numTriDashExpand', 'lblTriDashExpand', 'dashSafeExpand', ' UU', false, (v) => `+${v} UU (总通道宽 ${(layer.centerDashStrokeWidth ?? 30) + v * 2} UU)`);
 
     bindVal('numSplineTension', 'tension', true);
     bindVal('selEndSlopeMode', 'endSlopeMode', false);
@@ -1705,6 +2061,11 @@ class GroundStudioApp {
           layer.anchor2 = found.id;
           layer.x2 = found.x;
           layer.y2 = found.y;
+          if (layer.type === 'triangle_cone') {
+            const isSmall = found.id.startsWith('pad_sm');
+            layer.basePadRadius = isSmall ? 144 : 208;
+            layer.targetRadius = Number(((layer.basePadRadius * (layer.radiusPercent ?? 100)) / 100).toFixed(1));
+          }
           this.renderInspector();
           this.saveAndRenderCanvas();
         }
@@ -1726,12 +2087,12 @@ class GroundStudioApp {
     bindPickBtn('btnPickSegP1', 'seg_p1');
     bindPickBtn('btnPickSegP2', 'seg_p2');
 
-    bindVal('numP1X', 'x1', true, true);
-    bindVal('numP1Y', 'y1', true, true);
-    bindVal('numP2X', 'x2', true, true);
-    bindVal('numP2Y', 'y2', true, true);
-    bindVal('numP3X', 'x3', true, true);
-    bindVal('numP3Y', 'y3', true, true);
+    bindVal('numP1X', 'x1', true);
+    bindVal('numP1Y', 'y1', true);
+    bindVal('numP2X', 'x2', true);
+    bindVal('numP2Y', 'y2', true);
+    bindVal('numP3X', 'x3', true);
+    bindVal('numP3Y', 'y3', true);
 
     const chk3Pt = document.getElementById('chk3PtFullCircle');
     if (chk3Pt) {
@@ -1743,13 +2104,13 @@ class GroundStudioApp {
     }
 
     bindVal('inspRectSubMode', 'subMode', false, true);
-    bindVal('numRectX1', 'x1', true, true);
-    bindVal('numRectY1', 'y1', true, true);
-    bindVal('numRectX2', 'x2', true, true);
-    bindVal('numRectY2', 'y2', true, true);
+    bindVal('numRectX1', 'x1', true);
+    bindVal('numRectY1', 'y1', true);
+    bindVal('numRectX2', 'x2', true);
+    bindVal('numRectY2', 'y2', true);
 
     bindVal('inspTargetPads', 'targetPads', false);
-    bindVal('numInsetFromPickup', 'insetFromPickup', true, true);
+    bindVal('numInsetFromPickup', 'insetFromPickup', true);
 
     bindVal('inspTargetSpawns', 'targetSpawns', false);
     bindVal('inspSpawnShape', 'shape', false, true);
@@ -1805,11 +2166,15 @@ class GroundStudioApp {
 
   applyZoomToStages() {
     const baseHeight = Math.round((window.innerHeight - 140) * this.zoomScale);
+    const { w: scopeW, h: scopeH } = getScopeDimensions(this.project.canvasScope);
+    const aspect = scopeW / scopeH;
+    const baseWidth = Math.round(baseHeight * aspect);
+
     for (const id of ['stageQ1', 'stageFull']) {
       const svg = document.querySelector(`#${id} svg`);
       if (svg) {
         svg.style.height = `${baseHeight}px`;
-        svg.style.width = 'auto';
+        svg.style.width = `${baseWidth}px`;
         svg.style.maxHeight = this.zoomScale > 1.0 ? 'none' : 'calc(100vh - 140px)';
         svg.style.maxWidth = this.zoomScale > 1.0 ? 'none' : '100%';
       }
@@ -1835,6 +2200,7 @@ class GroundStudioApp {
     };
 
     svgEl.onmousemove = (evt) => {
+      if (this.wasPanningDrag) return;
       const pt = clientToUU(evt);
       const snap = this.magneticSnapEnabled ? findNearestAnchor(pt.q1x, pt.q1y, Q1_NAMED_ANCHORS, 250) : null;
 
@@ -1842,7 +2208,6 @@ class GroundStudioApp {
         ? `🧲 吸附 [${snap.code}] (${snap.x}, ${snap.y}) UU`
         : `X: ${pt.x} UU, Y: ${pt.y} UU (Q1: ${pt.q1x}, ${pt.q1y})`;
 
-      // Find nearest layer to cursor for hover highlight
       let bestLayer = null;
       let bestDist = 140;
       for (const l of this.project.layers) {
@@ -1872,6 +2237,7 @@ class GroundStudioApp {
     };
 
     svgEl.onclick = (evt) => {
+      if (this.wasPanningDrag) return;
       const pt = clientToUU(evt);
       const snap = this.magneticSnapEnabled ? findNearestAnchor(pt.q1x, pt.q1y, Q1_NAMED_ANCHORS, 250) : null;
       const targetX = snap ? snap.x : pt.q1x;
@@ -1884,16 +2250,23 @@ class GroundStudioApp {
           layer.cx = targetX;
           layer.cy = targetY;
           this.pickTarget = null;
-        } else if (layer.type === 'rect_or_line') {
+        } else if (layer.type === 'rect_or_line' || layer.type === 'triangle_cone') {
           if (this.pickTarget === 'seg_p1') {
             layer.x1 = targetX;
             layer.y1 = targetY;
             if (snap) layer.anchor1 = snap.id;
-            this.pickTarget = 'seg_p2'; // Auto-advance to P2!
+            this.pickTarget = 'seg_p2';
           } else if (this.pickTarget === 'seg_p2') {
             layer.x2 = targetX;
             layer.y2 = targetY;
-            if (snap) layer.anchor2 = snap.id;
+            if (snap) {
+              layer.anchor2 = snap.id;
+              if (layer.type === 'triangle_cone') {
+                const isSmall = snap.id.startsWith('pad_sm');
+                layer.basePadRadius = isSmall ? 144 : 208;
+                layer.targetRadius = Number(((layer.basePadRadius * (layer.radiusPercent ?? 100)) / 100).toFixed(1));
+              }
+            }
             this.pickTarget = null;
           }
         } else if (layer.type === 'three_point_arc') {
@@ -1917,7 +2290,6 @@ class GroundStudioApp {
         return;
       }
 
-      // If not in point-picking mode, clicking near any line on the canvas selects that layer!
       if (this.hoveredLayerId && this.hoveredLayerId !== this.selectedLayerId) {
         this.selectedLayerId = this.hoveredLayerId;
         this.renderLayerList();

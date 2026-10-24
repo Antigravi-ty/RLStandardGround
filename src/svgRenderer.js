@@ -18,6 +18,12 @@ import {
   solveThreePointArc,
   describePolarArc,
   solveMonotoneFivePointSpline,
+  solveTriangleCone,
+  isOutsideCenterDashSafeZone,
+  buildNormalClippedSubPaths,
+  makeLineCurveDef,
+  makeCircularArcCurveDef,
+  makePolylineCurveDef,
   trimLineSegment,
   trimPolylineByArcLength,
   grayToCss,
@@ -78,6 +84,71 @@ export function buildSmallPadSafeAreaMaskDef(project) {
 }
 
 /**
+ * Builds the SVG <mask> elements for Center Dash Safe Area cutouts on a triangle_cone layer.
+ */
+function buildCenterDashSafeMaskShapes(layer, fillOrStroke = 'black') {
+  if (!layer.cutByCenterDashSafeArea || layer.dashSafeMode === 'none') return '';
+
+  const x1 = Number(layer.x1 ?? 2048);
+  const y1 = Number(layer.y1 ?? 2560);
+  const x2 = Number(layer.x2 ?? 3072);
+  const y2 = Number(layer.y2 ?? 4096);
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const dist = Math.hypot(dx, dy);
+  if (dist < 1e-2) return '';
+
+  const ux = dx / dist;
+  const uy = dy / dist;
+
+  const centerSw = Math.max(0, Number(layer.centerDashStrokeWidth ?? 30));
+  const safeExpand = Math.max(0, Number(layer.dashSafeExpand ?? 22));
+  const totalSafeW = centerSw + safeExpand * 2;
+  const mode = layer.dashSafeMode || 'corridor';
+
+  if (mode === 'corridor') {
+    return `<line x1="${x1.toFixed(2)}" y1="${y1.toFixed(2)}" x2="${x2.toFixed(2)}" y2="${y2.toFixed(2)}" stroke="${fillOrStroke}" stroke-width="${totalSafeW.toFixed(2)}" stroke-linecap="butt" />`;
+  }
+
+  // Per-dash cutouts ('per_dash_box' or 'per_dash_pill')
+  const trimS = Math.max(0, Number(layer.centerDashTrimStart ?? 85));
+  const dLen = Math.max(1, Number(layer.centerDashLength ?? 110));
+  const gLen = Math.max(1, Number(layer.centerGapLength ?? 120));
+  const dOff = Number(layer.centerDashOffset ?? -30);
+  const period = dLen + gLen;
+  const maxD = dist - trimS;
+
+  let shapes = '';
+  const kMin = Math.floor((-dOff - dLen) / period) - 1;
+  const kMax = Math.ceil((maxD + Math.abs(dOff)) / period) + 1;
+
+  for (let k = kMin; k <= kMax; k++) {
+    const ds0 = Math.max(0, k * period - dOff);
+    const ds1 = Math.min(maxD, k * period - dOff + dLen);
+    if (ds1 - ds0 <= 1) continue;
+
+    if (mode === 'per_dash_pill') {
+      const s0 = trimS + ds0;
+      const s1 = trimS + ds1;
+      const sx = x1 + ux * s0;
+      const sy = y1 + uy * s0;
+      const ex = x1 + ux * s1;
+      const ey = y1 + uy * s1;
+      shapes += `<line x1="${sx.toFixed(2)}" y1="${sy.toFixed(2)}" x2="${ex.toFixed(2)}" y2="${ey.toFixed(2)}" stroke="${fillOrStroke}" stroke-width="${totalSafeW.toFixed(2)}" stroke-linecap="round" />`;
+    } else {
+      const s0 = trimS + ds0 - safeExpand;
+      const s1 = trimS + ds1 + safeExpand;
+      const sx = x1 + ux * s0;
+      const sy = y1 + uy * s0;
+      const ex = x1 + ux * s1;
+      const ey = y1 + uy * s1;
+      shapes += `<line x1="${sx.toFixed(2)}" y1="${sy.toFixed(2)}" x2="${ex.toFixed(2)}" y2="${ey.toFixed(2)}" stroke="${fillOrStroke}" stroke-width="${totalSafeW.toFixed(2)}" stroke-linecap="butt" />`;
+    }
+  }
+  return shapes;
+}
+
+/**
  * Helper to build the 4 L-shaped corner brackets path for a bounding box [x0, x1] x [y0, y1].
  */
 function buildFourCornersPathD(x0, x1, y0, y1, cornerLen) {
@@ -102,15 +173,27 @@ function buildFourCornersPathD(x0, x1, y0, y1, cornerLen) {
 export function renderParametricLayerQ1(layer, index, shaderSim, isInteractiveSelected = false, project = null) {
   if (!layer || !layer.visible) return { defsHtml: '', bodyHtml: '' };
 
+  const { w: scopeW, h: scopeH } = getScopeDimensions(project?.canvasScope);
   const clipId = `clip_${layer.id}_${index}`;
   const cxMin = Number(layer.clipXMin ?? 0);
-  const cxMax = Number(layer.clipXMax ?? 4096);
+  const cxMax = Number(layer.clipXMax ?? scopeW);
   const cyMin = Number(layer.clipYMin ?? 0);
-  const cyMax = Number(layer.clipYMax ?? 6000);
+  const cyMax = Number(layer.clipYMax ?? scopeH);
   const cw = Math.max(0, cxMax - cxMin);
   const ch = Math.max(0, cyMax - cyMin);
 
-  let defsHtml = `<clipPath id="${clipId}"><rect x="${cxMin}" y="${cyMin}" width="${cw}" height="${ch}" /></clipPath>`;
+  const useNormalPathClip = (layer.dashClipMode || 'normal_path') !== 'box_mask' &&
+    ['rect_or_line', 'circle_arc', 'three_point_arc', 'monotone_pad_spline', 'triangle_cone'].includes(layer.type) &&
+    !(layer.type === 'rect_or_line' && layer.subMode === 'rect_box');
+
+  // When using 1D Centerline Normal Clipping, the outer clipPath only clips at Q1 quadrant boundaries [0..scopeW, 0..scopeH]
+  // so interior Clip Box cuts are perpendicular to the stroke rather than obliquely sliced!
+  const effClipX = useNormalPathClip ? 0 : cxMin;
+  const effClipY = useNormalPathClip ? 0 : cyMin;
+  const effClipW = useNormalPathClip ? scopeW : cw;
+  const effClipH = useNormalPathClip ? scopeH : ch;
+
+  let defsHtml = `<clipPath id="${clipId}"><rect x="${effClipX}" y="${effClipY}" width="${effClipW}" height="${effClipH}" /></clipPath>`;
   let innerHtml = '';
 
   const resolvedStroke = project
@@ -120,7 +203,7 @@ export function renderParametricLayerQ1(layer, index, shaderSim, isInteractiveSe
 
   const fillColor = (layer.fillGray !== undefined && layer.fillGray >= 0)
     ? (project
-        ? resolveLayerGrayAndCss({ gray: layer.fillGray, grayLevel: layer.fillGrayLevel }, layer.opacity ?? 1.0, project, Boolean(shaderSim?.enabled)).css
+        ? resolveLayerGrayAndCss({ gray: layer.fillGray, grayLevel: layer.fillGrayLevel ?? layer.grayLevel }, layer.opacity ?? 1.0, project, Boolean(shaderSim?.enabled)).css
         : grayToCss(layer.fillGray, layer.opacity ?? 1.0, shaderSim))
     : 'none';
 
@@ -187,13 +270,41 @@ export function renderParametricLayerQ1(layer, index, shaderSim, isInteractiveSe
     const r = Math.max(1, Number(layer.radius) || 100);
     const sDeg = Number(layer.startDeg ?? 0);
     const eDeg = Number(layer.endDeg ?? 360);
-    const d = describePolarArc(cx, cy, r, sDeg, eDeg, false, trimS, trimE);
+    const sw = Number(layer.strokeWidth) || 0;
+
     if (layer.fillGray !== undefined && layer.fillGray >= 0) {
       const fillD = describePolarArc(cx, cy, r, sDeg, eDeg, Math.abs(eDeg - sDeg) < 359.9, 0, 0);
       innerHtml += `<path d="${fillD}" fill="${fillColor}" stroke="none" />`;
     }
-    if (Number(layer.strokeWidth) > 0 && d) {
-      innerHtml += `<path d="${d}" fill="none" stroke="${strokeColor}" stroke-width="${layer.strokeWidth}" ${dashAttr} ${capJoinAttr} />`;
+
+    if (sw > 0) {
+      if (useNormalPathClip) {
+        const dir = eDeg >= sDeg ? 1 : -1;
+        const trimStartDeg = ((trimS / r) * 180) / Math.PI;
+        const trimEndDeg = ((trimE / r) * 180) / Math.PI;
+        const effStartDeg = sDeg + dir * trimStartDeg;
+        const effEndDeg = eDeg - dir * trimEndDeg;
+        const spanDeg = (effEndDeg - effStartDeg) * dir;
+        if (spanDeg > 0.01) {
+          const curveDef = makeCircularArcCurveDef(
+            cx,
+            cy,
+            r,
+            (effStartDeg * Math.PI) / 180,
+            (Math.min(360, spanDeg) * Math.PI) / 180,
+            dir
+          );
+          const subPaths = buildNormalClippedSubPaths(curveDef, layer, project, scopeW, scopeH);
+          if (subPaths.length > 0) {
+            innerHtml += `<path d="${subPaths.join(' ')}" fill="none" stroke="${strokeColor}" stroke-width="${sw}" ${capJoinAttr} />`;
+          }
+        }
+      } else {
+        const d = describePolarArc(cx, cy, r, sDeg, eDeg, false, trimS, trimE);
+        if (d) {
+          innerHtml += `<path d="${d}" fill="none" stroke="${strokeColor}" stroke-width="${sw}" ${dashAttr} ${capJoinAttr} />`;
+        }
+      }
     }
   } else if (layer.type === 'three_point_arc') {
     const x1 = Number(layer.x1) || 0;
@@ -202,37 +313,59 @@ export function renderParametricLayerQ1(layer, index, shaderSim, isInteractiveSe
     const y2 = Number(layer.y2) || 500;
     const x3 = Number(layer.x3) || 1000;
     const y3 = Number(layer.y3) || 0;
+    const sw = Number(layer.strokeWidth) || 0;
     const arc = solveThreePointArc(x1, y1, x2, y2, x3, y3, Boolean(layer.fullCircle), trimS, trimE);
-    if (Number(layer.strokeWidth) > 0 && arc.d) {
-      innerHtml += `<path d="${arc.d}" fill="none" stroke="${strokeColor}" stroke-width="${layer.strokeWidth}" ${dashAttr} ${capJoinAttr} />`;
+
+    if (sw > 0 && arc.d) {
+      if (useNormalPathClip && !arc.collinear && arc.r > 1e-3 && arc.effSweep > 1e-4) {
+        const curveDef = makeCircularArcCurveDef(arc.cx, arc.cy, arc.r, arc.effA1, arc.effSweep, arc.dir);
+        const subPaths = buildNormalClippedSubPaths(curveDef, layer, project, scopeW, scopeH);
+        if (subPaths.length > 0) {
+          innerHtml += `<path d="${subPaths.join(' ')}" fill="none" stroke="${strokeColor}" stroke-width="${sw}" ${capJoinAttr} />`;
+        }
+      } else {
+        innerHtml += `<path d="${arc.d}" fill="none" stroke="${strokeColor}" stroke-width="${sw}" ${dashAttr} ${capJoinAttr} />`;
+      }
     }
   } else if (layer.type === 'monotone_pad_spline') {
     const spline = solveMonotoneFivePointSpline(layer);
-    if (Number(layer.strokeWidth) > 0 && spline.d) {
-      innerHtml += `<path d="${spline.d}" fill="none" stroke="${strokeColor}" stroke-width="${layer.strokeWidth}" ${dashAttr} ${capJoinAttr} />`;
+    const sw = Number(layer.strokeWidth) || 0;
+    if (sw > 0 && spline.d) {
+      if (useNormalPathClip && spline.sampledPoints?.length >= 2) {
+        const curveDef = makePolylineCurveDef(spline.sampledPoints);
+        const subPaths = buildNormalClippedSubPaths(curveDef, layer, project, scopeW, scopeH);
+        if (subPaths.length > 0) {
+          innerHtml += `<path d="${subPaths.join(' ')}" fill="none" stroke="${strokeColor}" stroke-width="${sw}" ${capJoinAttr} />`;
+        }
+      } else {
+        innerHtml += `<path d="${spline.d}" fill="none" stroke="${strokeColor}" stroke-width="${sw}" ${dashAttr} ${capJoinAttr} />`;
+      }
     }
   } else if (layer.type === 'rect_or_line') {
     const sw = Number(layer.strokeWidth) || 0;
-    if (layer.subMode === 'hline_y0') {
-      const y = Number(layer.y1) || 0;
-      const t = trimLineSegment(Number(layer.x1) || 0, y, Number(layer.x2) || 3840, y, trimS, trimE);
-      if (t.valid && sw > 0) {
-        innerHtml += `<line x1="${t.x1.toFixed(2)}" y1="${t.y1.toFixed(2)}" x2="${t.x2.toFixed(2)}" y2="${t.y2.toFixed(2)}" stroke="${strokeColor}" stroke-width="${sw}" ${dashAttr} ${capJoinAttr} />`;
+    if (layer.subMode === 'hline_y0' || layer.subMode === 'vline_x0' || layer.subMode === 'custom_segment') {
+      let lx1 = Number(layer.x1) || 0;
+      let ly1 = Number(layer.y1) || 0;
+      let lx2 = Number(layer.x2) || 0;
+      let ly2 = Number(layer.y2) || 0;
+      if (layer.subMode === 'hline_y0') {
+        ly2 = ly1;
+        if (!layer.x2) lx2 = 3840;
+      } else if (layer.subMode === 'vline_x0') {
+        lx2 = lx1;
+        if (!layer.y2) ly2 = 5120;
       }
-    } else if (layer.subMode === 'vline_x0') {
-      const x = Number(layer.x1) || 0;
-      const t = trimLineSegment(x, Number(layer.y1) || 0, x, Number(layer.y2) || 5120, trimS, trimE);
+      const t = trimLineSegment(lx1, ly1, lx2, ly2, trimS, trimE);
       if (t.valid && sw > 0) {
-        innerHtml += `<line x1="${t.x1.toFixed(2)}" y1="${t.y1.toFixed(2)}" x2="${t.x2.toFixed(2)}" y2="${t.y2.toFixed(2)}" stroke="${strokeColor}" stroke-width="${sw}" ${dashAttr} ${capJoinAttr} />`;
-      }
-    } else if (layer.subMode === 'custom_segment') {
-      const t = trimLineSegment(
-        Number(layer.x1) || 0, Number(layer.y1) || 0,
-        Number(layer.x2) || 0, Number(layer.y2) || 0,
-        trimS, trimE
-      );
-      if (t.valid && sw > 0) {
-        innerHtml += `<line x1="${t.x1.toFixed(2)}" y1="${t.y1.toFixed(2)}" x2="${t.x2.toFixed(2)}" y2="${t.y2.toFixed(2)}" stroke="${strokeColor}" stroke-width="${sw}" ${dashAttr} ${capJoinAttr} />`;
+        if (useNormalPathClip) {
+          const curveDef = makeLineCurveDef(t.x1, t.y1, t.x2, t.y2);
+          const subPaths = buildNormalClippedSubPaths(curveDef, layer, project, scopeW, scopeH);
+          if (subPaths.length > 0) {
+            innerHtml += `<path d="${subPaths.join(' ')}" fill="none" stroke="${strokeColor}" stroke-width="${sw}" ${capJoinAttr} />`;
+          }
+        } else {
+          innerHtml += `<line x1="${t.x1.toFixed(2)}" y1="${t.y1.toFixed(2)}" x2="${t.x2.toFixed(2)}" y2="${t.y2.toFixed(2)}" stroke="${strokeColor}" stroke-width="${sw}" ${dashAttr} ${capJoinAttr} />`;
+        }
       }
     } else {
       const rx1 = Math.min(Number(layer.x1) || 0, Number(layer.x2) || 1000);
@@ -251,6 +384,96 @@ export function renderParametricLayerQ1(layer, index, shaderSim, isInteractiveSe
           innerHtml += `<path d="${d}" fill="none" stroke="${strokeColor}" stroke-width="${sw}" ${dashAttr} ${capJoinAttr} />`;
         } else {
           innerHtml += `<rect x="${rx1}" y="${ry1}" width="${rw}" height="${rh}" rx="${layer.cornerRadius || 0}" fill="none" stroke="${strokeColor}" stroke-width="${sw}" ${dashAttr} ${capJoinAttr} />`;
+        }
+      }
+    }
+  } else if (layer.type === 'triangle_cone') {
+    const cone = solveTriangleCone(layer);
+    if (cone.valid) {
+      const sw = Number(layer.strokeWidth ?? 24);
+      const renderStyle = layer.renderStyle || 'stroked_sides';
+      const hasFill = renderStyle === 'filled_zone' || renderStyle === 'filled_and_stroked' || (layer.fillGray !== undefined && layer.fillGray >= 0);
+      const hasStroke = renderStyle !== 'filled_zone' && sw > 0;
+
+      const targetPadClipR = layer.cutByTargetPad
+        ? Math.max(0, Number(layer.basePadRadius ?? 208) + Number(layer.targetPadSafeExpand ?? 32))
+        : 0;
+
+      // Build dedicated mask for filled zone (and box_mask mode) combining Target Pad Safe Area, Small/Big Pad Safe Area, and Center Dash Safe Area
+      const triMaskId = `mask_tri_${layer.id}_${index}`;
+      const smallExpand = Math.max(0, Number(project?.smallPadSafeExpand ?? 60));
+      const smallSafeR = ARENA_CONSTANTS.PAD_CYL_RAD_SMALL + smallExpand;
+      const bigExpand = Math.max(0, Number(project?.bigPadSafeExpand ?? 0));
+      const bigSafeR = ARENA_CONSTANTS.PAD_CYL_RAD_BIG + bigExpand;
+
+      let maskCutouts = '';
+      if (layer.cutBySmallPadSafeArea) {
+        maskCutouts += Q1_BOOST_PADS_SMALL.map(p => `<circle cx="${p.x}" cy="${p.y}" r="${smallSafeR.toFixed(2)}" fill="black" />`).join('');
+      }
+      if (layer.cutByBigPadSafeArea) {
+        maskCutouts += Q1_BOOST_PADS_BIG.map(p => `<circle cx="${p.x}" cy="${p.y}" r="${bigSafeR.toFixed(2)}" fill="black" />`).join('');
+      }
+      if (targetPadClipR > 0) {
+        maskCutouts += `<circle cx="${cone.x2.toFixed(2)}" cy="${cone.y2.toFixed(2)}" r="${targetPadClipR.toFixed(2)}" fill="black" />`;
+      }
+      maskCutouts += buildCenterDashSafeMaskShapes(layer, 'black');
+
+      defsHtml += `<mask id="${triMaskId}" maskUnits="userSpaceOnUse" x="-600" y="-600" width="5200" height="7200">
+        <rect x="-600" y="-600" width="5200" height="7200" fill="white" />
+        ${maskCutouts}
+      </mask>`;
+
+      if (hasFill) {
+        const effFillColor = fillColor !== 'none' ? fillColor : strokeColor;
+        innerHtml += `<path d="${cone.fillPolygonD}" fill="${effFillColor}" stroke="none" mask="url(#${triMaskId})" />`;
+      }
+
+      if (hasStroke) {
+        // Extra point filter for 1D centerline normal clipping on triangle edges:
+        // 1. Outside target pad safe circle (R = targetPadClipR)
+        // 2. Outside Center Dash Safe Area (with sw*0.5 clearance so inner edge of side stroke never touches the Dash Safe Area!)
+        const extraFilter = (px, py) => {
+          if (targetPadClipR > 0 && Math.hypot(px - cone.x2, py - cone.y2) < targetPadClipR) {
+            return false;
+          }
+          if (!isOutsideCenterDashSafeZone(px, py, layer, sw * 0.5)) {
+            return false;
+          }
+          return true;
+        };
+
+        const leftCurve = makeLineCurveDef(cone.leftStart[0], cone.leftStart[1], cone.leftEnd[0], cone.leftEnd[1]);
+        const rightCurve = makeLineCurveDef(cone.rightStart[0], cone.rightStart[1], cone.rightEnd[0], cone.rightEnd[1]);
+
+        if (useNormalPathClip) {
+          const leftPaths = buildNormalClippedSubPaths(leftCurve, layer, project, scopeW, scopeH, extraFilter);
+          const rightPaths = buildNormalClippedSubPaths(rightCurve, layer, project, scopeW, scopeH, extraFilter);
+          const allEdgePaths = [...leftPaths, ...rightPaths];
+
+          if (renderStyle === 'stroked_closed') {
+            const baseCurve = makeLineCurveDef(cone.leftEnd[0], cone.leftEnd[1], cone.rightEnd[0], cone.rightEnd[1]);
+            allEdgePaths.push(...buildNormalClippedSubPaths(baseCurve, layer, project, scopeW, scopeH, extraFilter));
+          } else if (renderStyle === 'stroked_arc') {
+            const arcR = Math.max(targetPadClipR, cone.targetR);
+            const aL = Math.atan2(cone.leftEnd[1] - cone.y2, cone.leftEnd[0] - cone.x2);
+            const aR = Math.atan2(cone.rightEnd[1] - cone.y2, cone.rightEnd[0] - cone.x2);
+            let diff = aR - aL;
+            while (diff > Math.PI) diff -= 2 * Math.PI;
+            while (diff < -Math.PI) diff += 2 * Math.PI;
+            const arcCurve = makeCircularArcCurveDef(cone.x2, cone.y2, arcR, aL, Math.abs(diff), diff >= 0 ? 1 : -1);
+            const baseFilter = (px, py) => isOutsideCenterDashSafeZone(px, py, layer, sw * 0.5);
+            allEdgePaths.push(...buildNormalClippedSubPaths(arcCurve, layer, project, scopeW, scopeH, baseFilter));
+          }
+
+          if (allEdgePaths.length > 0) {
+            innerHtml += `<path d="${allEdgePaths.join(' ')}" fill="none" stroke="${strokeColor}" stroke-width="${sw}" ${capJoinAttr} />`;
+          }
+        } else {
+          let rawD = `M ${cone.leftStart[0].toFixed(2)},${cone.leftStart[1].toFixed(2)} L ${cone.leftEnd[0].toFixed(2)},${cone.leftEnd[1].toFixed(2)} M ${cone.rightStart[0].toFixed(2)},${cone.rightStart[1].toFixed(2)} L ${cone.rightEnd[0].toFixed(2)},${cone.rightEnd[1].toFixed(2)}`;
+          if (renderStyle === 'stroked_closed') {
+            rawD += ` M ${cone.leftEnd[0].toFixed(2)},${cone.leftEnd[1].toFixed(2)} L ${cone.rightEnd[0].toFixed(2)},${cone.rightEnd[1].toFixed(2)}`;
+          }
+          innerHtml += `<path d="${rawD}" fill="none" stroke="${strokeColor}" stroke-width="${sw}" ${dashAttr} ${capJoinAttr} mask="url(#${triMaskId})" />`;
         }
       }
     }
@@ -335,7 +558,10 @@ export function renderParametricLayerQ1(layer, index, shaderSim, isInteractiveSe
     }
   }
 
-  const maskAttr = layer.cutBySmallPadSafeArea ? ` mask="url(#mask_small_pad_safe_q1)"` : '';
+  // Only apply the pixel mask if 1D normal path clipping is not handling it
+  const maskAttr = (!useNormalPathClip && layer.cutBySmallPadSafeArea && layer.type !== 'triangle_cone')
+    ? ` mask="url(#mask_small_pad_safe_q1)"`
+    : '';
   const bodyHtml = `<g id="${layer.id}" clip-path="url(#${clipId})"${maskAttr}>${innerHtml}</g>`;
   return { defsHtml, bodyHtml };
 }
@@ -410,13 +636,24 @@ export function renderReferenceOverlayQ1(project, {
     parts.push(padsHtml);
   }
 
-  // 4b. Small Pad Safe Area Visualization (R = 144 + smallPadSafeExpand)
+  // 4b. Small Pad Safe Area & Dash Safe Area Visualization
   if (ref.showSmallPadSafeArea) {
     const expand = Math.max(0, Number(project.smallPadSafeExpand ?? 60));
     const safeR = ARENA_CONSTANTS.PAD_CYL_RAD_SMALL + expand;
     let safeHtml = '<g id="Ref_SmallPad_SafeArea">';
     for (const p of Q1_BOOST_PADS_SMALL) {
       safeHtml += `<circle cx="${p.x}" cy="${p.y}" r="${safeR.toFixed(2)}" fill="rgba(236, 72, 153, 0.05)" stroke="#f472b6" stroke-width="5" stroke-dasharray="16,12" />`;
+    }
+    for (const l of (project.layers || [])) {
+      if (l.visible && l.type === 'triangle_cone') {
+        if (l.cutByTargetPad) {
+          const padR = Math.max(0, Number(l.basePadRadius ?? 208) + Number(l.targetPadSafeExpand ?? 32));
+          safeHtml += `<circle cx="${l.x2}" cy="${l.y2}" r="${padR.toFixed(2)}" fill="rgba(251, 191, 36, 0.05)" stroke="#fbbf24" stroke-width="5" stroke-dasharray="16,12" />`;
+        }
+        if (l.cutByCenterDashSafeArea && l.dashSafeMode !== 'none') {
+          safeHtml += `<g opacity="0.28">${buildCenterDashSafeMaskShapes(l, '#f472b6')}</g>`;
+        }
+      }
     }
     safeHtml += '</g>';
     parts.push(safeHtml);
@@ -437,7 +674,6 @@ export function renderReferenceOverlayQ1(project, {
       numHtml += `<rect x="${tx - 8}" y="${ty - 44}" width="118" height="54" rx="10" fill="rgba(15,23,42,0.88)" stroke="#38bdf8" stroke-width="3.5" />`;
       numHtml += `<text x="${tx + 51}" y="${ty - 4}" fill="#7dd3fc" font-size="42" text-anchor="middle">#${p.code}</text>`;
     }
-    // 4-Pad Intersection #IX1 at (2048, 0)
     numHtml += `<circle cx="2048" cy="0" r="16" fill="#a855f7" stroke="#ffffff" stroke-width="4" />`;
     numHtml += `<rect x="1970" y="24" width="156" height="52" rx="10" fill="rgba(15,23,42,0.9)" stroke="#a855f7" stroke-width="3.5" />`;
     numHtml += `<text x="2048" y="62" fill="#e9d5ff" font-size="38" text-anchor="middle">#IX1</text>`;
@@ -471,7 +707,6 @@ export function renderReferenceOverlayQ1(project, {
         const ry = hb.offsetY - hb.width / 2;
         g += `<rect x="${rx.toFixed(2)}" y="${ry.toFixed(2)}" width="${hb.length.toFixed(2)}" height="${hb.width.toFixed(2)}" fill="${hb.color}" fill-opacity="0.08" stroke="${hb.color}" stroke-width="3" stroke-dasharray="10,6" />`;
       }
-      // Also show the exact Union Bounding Box in dashed emerald
       g += `<rect x="${ALL_HITBOX_UNION_BOUNDS.minX.toFixed(2)}" y="${ALL_HITBOX_UNION_BOUNDS.minY.toFixed(2)}" width="${ALL_HITBOX_UNION_BOUNDS.length.toFixed(2)}" height="${ALL_HITBOX_UNION_BOUNDS.width.toFixed(2)}" fill="none" stroke="#10b981" stroke-width="4" stroke-dasharray="12,8" />`;
       g += `<line x1="0" y1="0" x2="115" y2="0" stroke="#ffffff" stroke-width="4" />`;
       g += `<polygon points="130,0 105,-12 105,12" fill="#ffffff" />`;
@@ -484,29 +719,44 @@ export function renderReferenceOverlayQ1(project, {
     for (const sp of Q1_DEMO_RESPAWNS) parts.push(renderCarRef(sp, true));
   }
 
-  // 6. Hovered Layer Visual Highlight (when user moves mouse near a line on the canvas)
+  // 6. Hovered Layer Visual Highlight
   if (hoveredLayer && hoveredLayer.visible && (!activeLayer || hoveredLayer.id !== activeLayer.id)) {
     const hovRender = renderParametricLayerQ1(
       { ...hoveredLayer, gray: 255, opacity: 0.9, strokeWidth: Math.max(24, (Number(hoveredLayer.strokeWidth) || 16) + 14), dashLength: 0, gapLength: 0 },
       998,
-      { enabled: true, groundColor: '#000000', lineColor: '#38bdf8', threshold: 0.1, smoothness: 0.05 }
+      { enabled: true, groundColor: '#000000', lineColor: '#38bdf8', threshold: 0.1, smoothness: 0.05 },
+      false,
+      project
     );
     parts.push(`<g opacity="0.55">${hovRender.bodyHtml}</g>`);
   }
 
   // 7. Active Selected Layer Interactive Handles & Construction Guides
   if (activeLayer && activeLayer.visible) {
-    // Subtle cyan selection halo on the selected layer
     const selRender = renderParametricLayerQ1(
       { ...activeLayer, gray: 255, opacity: 0.85, strokeWidth: Math.max(26, (Number(activeLayer.strokeWidth) || 16) + 16), dashLength: 0, gapLength: 0 },
       999,
-      { enabled: true, groundColor: '#000000', lineColor: '#22d3ee', threshold: 0.1, smoothness: 0.05 }
+      { enabled: true, groundColor: '#000000', lineColor: '#22d3ee', threshold: 0.1, smoothness: 0.05 },
+      true,
+      project
     );
     parts.push(`<g opacity="0.32">${selRender.bodyHtml}</g>`);
 
-    if (activeLayer.type === 'monotone_pad_spline') {
+    if (activeLayer.type === 'triangle_cone') {
+      const cone = solveTriangleCone(activeLayer);
+      if (cone.valid) {
+        parts.push(`<path d="${cone.fillPolygonD}" fill="rgba(251, 191, 36, 0.07)" stroke="#fbbf24" stroke-width="4" stroke-dasharray="14,10" opacity="0.75" />`);
+        parts.push(`<circle cx="${cone.x2}" cy="${cone.y2}" r="${cone.targetR.toFixed(2)}" fill="none" stroke="#fbbf24" stroke-width="5" stroke-dasharray="12,8" opacity="0.85" />`);
+        if (activeLayer.cutByCenterDashSafeArea && activeLayer.dashSafeMode !== 'none') {
+          parts.push(`<g opacity="0.22">${buildCenterDashSafeMaskShapes(activeLayer, '#f472b6')}</g>`);
+        }
+        parts.push(`<circle cx="${cone.x1}" cy="${cone.y1}" r="24" fill="#22c55e" stroke="#ffffff" stroke-width="5" />`);
+        parts.push(`<text x="${Number(cone.x1) + 34}" y="${Number(cone.y1) - 18}" fill="#4ade80" font-family="monospace" font-size="38" font-weight="bold">顶点P1(${Math.round(cone.x1)},${Math.round(cone.y1)})</text>`);
+        parts.push(`<circle cx="${cone.x2}" cy="${cone.y2}" r="24" fill="#fbbf24" stroke="#ffffff" stroke-width="5" />`);
+        parts.push(`<text x="${Number(cone.x2) + 34}" y="${Number(cone.y2) + 36}" fill="#fde047" font-family="monospace" font-size="38" font-weight="bold">目标P2(R=${Math.round(cone.targetR)} UU)</text>`);
+      }
+    } else if (activeLayer.type === 'monotone_pad_spline') {
       const spline = solveMonotoneFivePointSpline(activeLayer);
-      // Show the 4-pad intersection construction lines: #S1(1024,0)--#B1(3584,0) and #S3(2048,0)--#S3(2048,1036)
       parts.push(`<line x1="1024" y1="0" x2="3584" y2="0" stroke="#a855f7" stroke-width="5" stroke-dasharray="16,12" opacity="0.8" />`);
       parts.push(`<line x1="2048" y1="0" x2="2048" y2="1036" stroke="#a855f7" stroke-width="5" stroke-dasharray="16,12" opacity="0.8" />`);
       parts.push(`<circle cx="2048" cy="0" r="18" fill="#a855f7" stroke="#ffffff" stroke-width="4" />`);
@@ -528,7 +778,6 @@ export function renderReferenceOverlayQ1(project, {
     } else if (activeLayer.type === 'circle_arc') {
       parts.push(`<circle cx="${activeLayer.cx}" cy="${activeLayer.cy}" r="24" fill="#a855f7" stroke="#ffffff" stroke-width="5" />`);
     } else if (activeLayer.type === 'rect_or_line' && activeLayer.subMode === 'custom_segment') {
-      // Show full raw segment in faint dashed yellow and endpoints P1 / P2
       parts.push(`<line x1="${activeLayer.x1}" y1="${activeLayer.y1}" x2="${activeLayer.x2}" y2="${activeLayer.y2}" stroke="#facc15" stroke-width="4" stroke-dasharray="14,14" opacity="0.65" />`);
       parts.push(`<circle cx="${activeLayer.x1}" cy="${activeLayer.y1}" r="24" fill="#22c55e" stroke="#ffffff" stroke-width="5" />`);
       parts.push(`<text x="${Number(activeLayer.x1) + 34}" y="${Number(activeLayer.y1) - 18}" fill="#4ade80" font-family="monospace" font-size="38" font-weight="bold">起点P1(${Math.round(activeLayer.x1)},${Math.round(activeLayer.y1)})</text>`);
@@ -566,7 +815,6 @@ export function buildArenaSvgString(project, {
   const { w: scopeW, h: scopeH } = getScopeDimensions(project.canvasScope);
   const shaderSim = useShaderPreview ? { ...project.shaderPreview, enabled: true } : null;
 
-  // Allow overriding colorPalettePreview.enabled (e.g. when exporting pure grayscale vs color preview)
   const effectiveProject = useColorPalettePreview !== null
     ? {
         ...project,

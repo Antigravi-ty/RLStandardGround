@@ -3,11 +3,24 @@
  * - Polyline inward/outward normal offset (miter-clamped inset/outset)
  * - 3-Point Circle / Circular Arc exact solver (Circumcircle + Sweep angle)
  * - 5-Point Monotone-Slope Oval Spline solver (with 4-Pad Intersection + Midfield C1 vertical tangent)
- * - Line & Curve Arc-Length Start/End Trimming (trimStart / trimEnd in UU)
+ * - Triangle Cone / Boost Collection Effective Zone solver (#KO1 -> #B2 with Dash Safe Area & Pad Safe Area)
+ * - 1D Centerline Normal Clipper for Dashed & Solid Lines/Arcs/Splines (eliminates oblique Clip Box bevels)
  * - Magnetic Anchor Snapping & Nearest Layer Hit-Testing
  */
 
-import { Q1_FLAT_FLOOR_CONTOUR, Q1_PITCH_FLAT_FLOOR_CONTOUR, Q1_BOOST_PADS_BIG, Q1_BOOST_PADS_SMALL, Q1_KICKOFF_SPAWNS, Q1_DEMO_RESPAWNS } from './physicsData.js';
+import {
+  ARENA_CONSTANTS,
+  Q1_FLAT_FLOOR_CONTOUR,
+  Q1_PITCH_FLAT_FLOOR_CONTOUR,
+  Q1_DRIFTWOODS_GROUND_MESH_CONTOUR,
+  Q1_DRIFTWOODS_PITCH_MESH_CONTOUR,
+  Q1_OUTER_WALL_CONTOUR,
+  Q1_PITCH_OUTER_WALL_CONTOUR,
+  Q1_BOOST_PADS_BIG,
+  Q1_BOOST_PADS_SMALL,
+  Q1_KICKOFF_SPAWNS,
+  Q1_DEMO_RESPAWNS
+} from './physicsData.js';
 
 export function offsetQ1Contour(points, insetDist) {
   if (!points || points.length < 2 || Math.abs(insetDist) < 1e-3) {
@@ -169,6 +182,13 @@ export function solveThreePointArc(x1, y1, x2, y2, x3, y3, fullCircle = false, t
       cx,
       cy,
       r,
+      effA1: 0,
+      effSweep: 2 * Math.PI,
+      dir: 1,
+      goesPositive: true,
+      startDeg: 0,
+      endDeg: 360,
+      sweepDeg: 360,
       d: `M ${(cx - r).toFixed(2)},${cy.toFixed(2)} a ${r.toFixed(2)},${r.toFixed(2)} 0 1,0 ${(r * 2).toFixed(2)},0 a ${r.toFixed(2)},${r.toFixed(2)} 0 1,0 ${(-r * 2).toFixed(2)},0`
     };
   }
@@ -182,14 +202,14 @@ export function solveThreePointArc(x1, y1, x2, y2, x3, y3, fullCircle = false, t
   const ccw13 = normAngle(a3 - a1);
 
   const goesPositive = ccw12 <= ccw13;
-  let sweepAngle = goesPositive ? ccw13 : (2 * Math.PI - ccw13);
+  const sweepAngle = goesPositive ? ccw13 : (2 * Math.PI - ccw13);
   const dir = goesPositive ? 1 : -1;
 
   const tStartAngle = r > 1e-3 ? Math.max(0, Number(trimStart) || 0) / r : 0;
   const tEndAngle = r > 1e-3 ? Math.max(0, Number(trimEnd) || 0) / r : 0;
 
   if (tStartAngle + tEndAngle >= sweepAngle - 1e-4) {
-    return { collinear: false, cx, cy, r, d: '' };
+    return { collinear: false, cx, cy, r, effA1: a1, effSweep: 0, dir, goesPositive, d: '' };
   }
 
   const effA1 = a1 + dir * tStartAngle;
@@ -205,7 +225,20 @@ export function solveThreePointArc(x1, y1, x2, y2, x3, y3, fullCircle = false, t
   const sweepFlag = goesPositive ? 1 : 0;
 
   const d = `M ${sx.toFixed(2)},${sy.toFixed(2)} A ${r.toFixed(2)},${r.toFixed(2)} 0 ${largeArcFlag},${sweepFlag} ${ex.toFixed(2)},${ey.toFixed(2)}`;
-  return { collinear: false, cx, cy, r, startDeg: (effA1 * 180) / Math.PI, endDeg: (effA3 * 180) / Math.PI, sweepDeg: (effSweep * 180) / Math.PI, d };
+  return {
+    collinear: false,
+    cx,
+    cy,
+    r,
+    effA1,
+    effSweep,
+    dir,
+    goesPositive,
+    startDeg: (effA1 * 180) / Math.PI,
+    endDeg: (effA3 * 180) / Math.PI,
+    sweepDeg: (effSweep * 180) / Math.PI,
+    d
+  };
 }
 
 /**
@@ -249,14 +282,11 @@ export function describePolarArc(cx, cy, r, startDeg, endDeg, closePie = false, 
  * - P3: #S4 (1788, 2300)
  * - P4: #S7 (940, 3308)
  * - P5: #S9 (0, 4240)
- *
- * Uses a convex tangent-triangle Cubic Bézier solver (s_k < D_k < s_{k+1}) so that on every segment,
- * both the coordinates AND the slope dX/dY change strictly monotonically with zero inflection points.
  */
 export function solveMonotoneFivePointSpline(layer) {
   const midExpand = Number(layer.midXExpand ?? 112);
   const tension = Math.max(0.15, Math.min(0.95, Number(layer.tension ?? 0.55)));
-  const endMode = layer.endSlopeMode || 'natural_pointed'; // 'natural_pointed' | 'flat_x0'
+  const endMode = layer.endSlopeMode || 'natural_pointed';
 
   const pts = [
     [Math.max(2049, 2048 + midExpand), 0.0],
@@ -266,29 +296,24 @@ export function solveMonotoneFivePointSpline(layer) {
     [Number(layer.p5x ?? 0), Number(layer.p5y ?? 4240)]
   ];
 
-  const n = pts.length - 1; // 4 segments
+  const n = pts.length - 1;
   const D = [];
   for (let k = 0; k < n; k++) {
     const dx = pts[k + 1][0] - pts[k][0];
     const dy = Math.max(1.0, pts[k + 1][1] - pts[k][1]);
-    D.push(Math.max(1e-4, -dx / dy)); // Positive secant slope s = -dX/dY
+    D.push(Math.max(1e-4, -dx / dy));
   }
 
-  // Node slopes s[0..n] = -dX/dY at each node:
-  // s[0] = 0.0 (exact vertical tangent at Y = 0 midfield line!)
   const s = new Array(n + 1).fill(0);
   s[0] = 0.0;
 
   for (let k = 1; k < n; k++) {
     if (D[k - 1] < D[k]) {
-      // Strictly increasing secant slopes -> pick balanced slope strictly inside (D[k-1], D[k])
-      // Ideal quadratic midpoint condition is s[k] = 2*D[k-1] - s[k-1], clamped strictly inside (D[k-1], D[k])
       const ideal = 2 * D[k - 1] - s[k - 1];
       const lo = D[k - 1] + 0.18 * (D[k] - D[k - 1]);
       const hi = D[k - 1] + 0.82 * (D[k] - D[k - 1]);
       s[k] = Math.max(lo, Math.min(hi, ideal));
     } else {
-      // Fallback if user pushed midXExpand beyond collinear limit (> 213.1 UU): Fritsch-Carlson harmonic mean
       s[k] = (2 * D[k - 1] * D[k]) / (D[k - 1] + D[k]);
     }
   }
@@ -309,7 +334,6 @@ export function solveMonotoneFivePointSpline(layer) {
     const sk1 = s[k + 1];
     const chord = Math.hypot(xB - xA, yB - yA);
 
-    // Unit tangent vectors at A (pointing toward B) and at B (pointing from A)
     const uAx = -sk / Math.hypot(sk, 1);
     const uAy = 1 / Math.hypot(sk, 1);
     const uBx = -sk1 / Math.hypot(sk1, 1);
@@ -318,7 +342,6 @@ export function solveMonotoneFivePointSpline(layer) {
     let L1 = tension * chord * 0.55;
     let L2 = tension * chord * 0.55;
 
-    // If sk < D[k] < sk1, clamp handle lengths inside the tangent intersection triangle Q_k so inflection is impossible!
     const denom = sk1 - sk;
     if (denom > 1e-5 && sk <= D[k] && D[k] <= sk1) {
       const yQ = (xB - xA + sk1 * yB - sk * yA) / denom;
@@ -336,7 +359,7 @@ export function solveMonotoneFivePointSpline(layer) {
 
     bezierSegments.push({ xA, yA, c1x, c1y, c2x, c2y, xB, yB });
 
-    const steps = 36;
+    const steps = 48;
     for (let i = (k === 0 ? 0 : 1); i <= steps; i++) {
       const t = i / steps;
       const mt = 1 - t;
@@ -348,11 +371,13 @@ export function solveMonotoneFivePointSpline(layer) {
 
   const tStart = Math.max(0, Number(layer.trimStart) || 0);
   const tEnd = Math.max(0, Number(layer.trimEnd) || 0);
+  const trimmedPoints = (tStart > 0.5 || tEnd > 0.5)
+    ? trimPolylineByArcLength(sampledPoints, tStart, tEnd)
+    : sampledPoints;
 
   let d = '';
   if (tStart > 0.5 || tEnd > 0.5) {
-    const trimmed = trimPolylineByArcLength(sampledPoints, tStart, tEnd);
-    d = trimmed.map(([x, y], i) => `${i === 0 ? 'M' : 'L'} ${x.toFixed(2)},${y.toFixed(2)}`).join(' ');
+    d = trimmedPoints.map(([x, y], i) => `${i === 0 ? 'M' : 'L'} ${x.toFixed(2)},${y.toFixed(2)}`).join(' ');
   } else {
     d = bezierSegments.map((seg, i) => {
       const prefix = i === 0 ? `M ${seg.xA.toFixed(2)},${seg.yA.toFixed(2)} ` : '';
@@ -365,9 +390,441 @@ export function solveMonotoneFivePointSpline(layer) {
     secantSlopes: D,
     nodeSlopes: s,
     intersectionAnchor: [2048, 0],
-    sampledPoints,
+    sampledPoints: trimmedPoints,
     d
   };
+}
+
+/**
+ * Solves the Triangle Cone / Boost Collection Effective Zone (#KO1 -> #B2 or any P1 -> P2):
+ * - Starts from apex P1(x1, y1) (with optional `apexSpread` half-width and `trimStart` axial offset)
+ * - Expands to target pad P2(x2, y2) utilizing `targetRadius` (= `basePadRadius * radiusPercent / 100`)
+ * - Supports `coneMode`: 'tangent' (exact tangent lines to the pad's radius circle) or 'chord' (perpendicular diameter endpoints)
+ * - Computes left side segment, right side segment, base chord/arc, and closed polygon path.
+ */
+export function solveTriangleCone(layer) {
+  const x1 = Number(layer.x1 ?? 2048);
+  const y1 = Number(layer.y1 ?? 2560);
+  const x2 = Number(layer.x2 ?? 3072);
+  const y2 = Number(layer.y2 ?? 4096);
+
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const dist = Math.hypot(dx, dy);
+
+  if (dist < 1e-2) {
+    return { valid: false, dist: 0 };
+  }
+
+  const ux = dx / dist;
+  const uy = dy / dist;
+  const nx = -uy;
+  const ny = ux;
+
+  const basePadR = Math.max(1, Number(layer.basePadRadius ?? 208));
+  const pct = Math.max(1, Number(layer.radiusPercent ?? 100));
+  const targetR = Math.max(2, Number(layer.targetRadius ?? ((basePadR * pct) / 100)));
+  const apexSpread = Math.max(0, Number(layer.apexSpread ?? 0));
+  const coneMode = layer.coneMode || 'tangent';
+
+  const deltaR = targetR - apexSpread;
+  let sinAlpha = 0;
+  let cosAlpha = 1;
+  let tanAlpha = 0;
+  let sBase = dist;
+  let wBase = targetR;
+
+  if (coneMode === 'tangent' && Math.abs(deltaR) < dist * 0.98) {
+    sinAlpha = deltaR / dist;
+    cosAlpha = Math.sqrt(Math.max(1e-6, 1 - sinAlpha * sinAlpha));
+    tanAlpha = sinAlpha / cosAlpha;
+    sBase = dist - targetR * sinAlpha;
+    wBase = targetR * cosAlpha;
+  } else {
+    tanAlpha = deltaR / dist;
+    sinAlpha = tanAlpha / Math.hypot(1, tanAlpha);
+    cosAlpha = 1 / Math.hypot(1, tanAlpha);
+    sBase = dist;
+    wBase = targetR;
+  }
+
+  const tStart = Math.max(0, Number(layer.trimStart) || 0);
+  const tEnd = Math.max(0, Number(layer.trimEnd) || 0);
+  const sMin = Math.min(sBase, tStart);
+  const sMax = Math.max(sMin, sBase - tEnd);
+
+  const widthAtAxial = (s) => Math.max(0, apexSpread + s * tanAlpha);
+
+  const wMin = widthAtAxial(sMin);
+  const wMax = widthAtAxial(sMax);
+
+  const startCenterX = x1 + ux * sMin;
+  const startCenterY = y1 + uy * sMin;
+  const endCenterX = x1 + ux * sMax;
+  const endCenterY = y1 + uy * sMax;
+
+  // Left and Right vertices at sMin (near #KO1) and sMax (near #B2)
+  const leftStart = [startCenterX + nx * wMin, startCenterY + ny * wMin];
+  const rightStart = [startCenterX - nx * wMin, startCenterY - ny * wMin];
+  const leftEnd = [endCenterX + nx * wMax, endCenterY + ny * wMax];
+  const rightEnd = [endCenterX - nx * wMax, endCenterY - ny * wMax];
+
+  // Unclipped full side rays from s=0 to s=sBase (for reference/polygon)
+  const apexLeft = [x1 + nx * apexSpread, y1 + ny * apexSpread];
+  const apexRight = [x1 - nx * apexSpread, y1 - ny * apexSpread];
+  const baseLeft = [x1 + ux * sBase + nx * wBase, y1 + uy * sBase + ny * wBase];
+  const baseRight = [x1 + ux * sBase - nx * wBase, y1 + uy * sBase - ny * wBase];
+
+  // Closed polygon path for filled effective zone (from sMin to sMax, or around target circle)
+  const fillPolygonD = [
+    `M ${leftStart[0].toFixed(2)},${leftStart[1].toFixed(2)}`,
+    `L ${leftEnd[0].toFixed(2)},${leftEnd[1].toFixed(2)}`,
+    `L ${rightEnd[0].toFixed(2)},${rightEnd[1].toFixed(2)}`,
+    `L ${rightStart[0].toFixed(2)},${rightStart[1].toFixed(2)}`,
+    'Z'
+  ].join(' ');
+
+  return {
+    valid: sMax > sMin + 0.5,
+    x1,
+    y1,
+    x2,
+    y2,
+    dist,
+    ux,
+    uy,
+    nx,
+    ny,
+    basePadR,
+    targetR,
+    apexSpread,
+    halfAngleDeg: (Math.atan(tanAlpha) * 180) / Math.PI,
+    tanAlpha,
+    sinAlpha,
+    cosAlpha,
+    sBase,
+    wBase,
+    sMin,
+    sMax,
+    wMin,
+    wMax,
+    leftStart,
+    rightStart,
+    leftEnd,
+    rightEnd,
+    apexLeft,
+    apexRight,
+    baseLeft,
+    baseRight,
+    fillPolygonD
+  };
+}
+
+/**
+ * Computes whether a point (px, py) is inside the Center Dashed Line Safe Area of a triangle_cone
+ * (or a general dashed segment from (x1, y1) to (x2, y2)).
+ * Returns true if the point is SAFE (i.e. OUTSIDE the forbidden dash buffer zone),
+ * or false if the point is INSIDE the forbidden dash buffer zone and should be clipped out.
+ */
+export function isOutsideCenterDashSafeZone(px, py, layer, extraStrokeClearance = 0) {
+  if (!layer.cutByCenterDashSafeArea || layer.dashSafeMode === 'none') return true;
+
+  const x1 = Number(layer.x1 ?? 2048);
+  const y1 = Number(layer.y1 ?? 2560);
+  const x2 = Number(layer.x2 ?? 3072);
+  const y2 = Number(layer.y2 ?? 4096);
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const dist = Math.hypot(dx, dy);
+  if (dist < 1e-2) return true;
+
+  const ux = dx / dist;
+  const uy = dy / dist;
+  const nx = -uy;
+  const ny = ux;
+
+  // Axial coordinate s along P1 -> P2 and lateral distance lat from centerline
+  const rx = px - x1;
+  const ry = py - y1;
+  const s = rx * ux + ry * uy;
+  const lat = Math.abs(rx * nx + ry * ny);
+
+  const centerSw = Math.max(0, Number(layer.centerDashStrokeWidth ?? 30));
+  const safeExpand = Math.max(0, Number(layer.dashSafeExpand ?? 22));
+  const halfSafeWidth = centerSw * 0.5 + safeExpand + extraStrokeClearance;
+
+  if (lat >= halfSafeWidth) return true;
+
+  const mode = layer.dashSafeMode || 'corridor';
+  if (mode === 'corridor') {
+    return false;
+  }
+
+  // Per-dash safe area ('per_dash_box' or 'per_dash_pill'):
+  const trimS = Math.max(0, Number(layer.centerDashTrimStart ?? 85));
+  const dLen = Math.max(1, Number(layer.centerDashLength ?? 110));
+  const gLen = Math.max(1, Number(layer.centerGapLength ?? 120));
+  const dOff = Number(layer.centerDashOffset ?? -30);
+  const period = dLen + gLen;
+
+  // Distance along trimmed dashed line
+  const dCoord = s - trimS;
+  if (dCoord < -safeExpand || dCoord > dist - trimS + safeExpand) return true;
+
+  const kApprox = Math.floor((dCoord + dOff) / period);
+  for (let k = kApprox - 1; k <= kApprox + 1; k++) {
+    const dashStart = k * period - dOff;
+    const dashEnd = dashStart + dLen;
+    if (dashEnd < 0 || dashStart > dist - trimS) continue;
+
+    if (mode === 'per_dash_pill') {
+      // Capsule / pill around [dashStart, dashEnd] with radius halfSafeWidth
+      const clampedD = Math.max(dashStart, Math.min(dashEnd, dCoord));
+      const distToDash = Math.hypot(dCoord - clampedD, lat);
+      if (distToDash < halfSafeWidth) return false;
+    } else {
+      // Rectangular box around [dashStart - safeExpand, dashEnd + safeExpand] x [-halfSafeWidth, +halfSafeWidth]
+      if (dCoord >= dashStart - safeExpand - extraStrokeClearance && dCoord <= dashEnd + safeExpand + extraStrokeClearance) {
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
+/**
+ * 1D Centerline Normal Clipper for Lines, Circular Arcs, Splines, and Triangle Edges:
+ * Clips a parametric 1D curve `{ totalLen, pointAt(s), subPathD(s0, s1) }` against:
+ * 1. Interior Clip Box boundaries (`clipXMin > 0`, `clipXMax < scopeW`, `clipYMin > 0`, `clipYMax < scopeH`)
+ * 2. Small Boost Pad Safe Area circles (`R = 144 + smallPadSafeExpand`)
+ * 3. Big Boost Pad Safe Area circles (`R = 208 + bigPadSafeExpand`)
+ * 4. Optional `extraPointFilter(x, y, s)` (e.g. Target Pad Safe Area & Center Dash Safe Area)
+ *
+ * For dashed curves (`dashLength > 0 && gapLength > 0`), computes each dash interval `[d0, d1]`
+ * along the original unclipped arc length `s` and intersects with valid intervals `[sA, sB]`.
+ * Every visible dash/segment is emitted via `subPathD(u0, u1)` with `stroke-linecap="butt"`,
+ * ensuring every cut edge is 100% perpendicular (normal) to the curve direction!
+ */
+export function buildNormalClippedSubPaths(curveDef, layer, project, scopeW = 4096, scopeH = 6000, extraPointFilter = null) {
+  const L = curveDef?.totalLen || 0;
+  if (L <= 0.5) return [];
+
+  const cxMin = Number(layer.clipXMin ?? 0);
+  const cxMax = Number(layer.clipXMax ?? scopeW);
+  const cyMin = Number(layer.clipYMin ?? 0);
+  const cyMax = Number(layer.clipYMax ?? scopeH);
+
+  const cutSmall = Boolean(layer.cutBySmallPadSafeArea);
+  const cutBig = Boolean(layer.cutByBigPadSafeArea);
+  const smallSafeR = ARENA_CONSTANTS.PAD_CYL_RAD_SMALL + Math.max(0, Number(project?.smallPadSafeExpand ?? 60));
+  const bigSafeR = ARENA_CONSTANTS.PAD_CYL_RAD_BIG + Math.max(0, Number(project?.bigPadSafeExpand ?? 0));
+
+  const isValidAt = (s) => {
+    const [x, y] = curveDef.pointAt(s);
+    // Only clip at interior Clip Box boundaries (> 0 and < scopeW/H).
+    // At X=0 (when cxMin<=0) and Y=0 (when cyMin<=0), allow the curve to reach the mirror axis
+    // so the outer Q1 clipPath makes a flush 4-quadrant mirror joint!
+    if (cxMin > 0.5 && x < cxMin) return false;
+    if (cxMax < scopeW - 0.5 && x > cxMax) return false;
+    if (cyMin > 0.5 && y < cyMin) return false;
+    if (cyMax < scopeH - 0.5 && y > cyMax) return false;
+
+    if (cutSmall) {
+      for (let i = 0; i < Q1_BOOST_PADS_SMALL.length; i++) {
+        const p = Q1_BOOST_PADS_SMALL[i];
+        if (Math.hypot(x - p.x, y - p.y) < smallSafeR) return false;
+      }
+    }
+    if (cutBig) {
+      for (let i = 0; i < Q1_BOOST_PADS_BIG.length; i++) {
+        const p = Q1_BOOST_PADS_BIG[i];
+        if (Math.hypot(x - p.x, y - p.y) < bigSafeR) return false;
+      }
+    }
+    if (extraPointFilter && !extraPointFilter(x, y, s)) {
+      return false;
+    }
+    return true;
+  };
+
+  // Sample along s in [0, L] with step ~2 UU and refine transitions via bisection
+  const numSteps = Math.max(32, Math.min(2500, Math.ceil(L / 2.0)));
+  const step = L / numSteps;
+
+  const refineBoundary = (sIn, sOut) => {
+    let a = sIn;
+    let b = sOut;
+    for (let iter = 0; iter < 8; iter++) {
+      const mid = 0.5 * (a + b);
+      if (isValidAt(mid)) {
+        a = mid;
+      } else {
+        b = mid;
+      }
+    }
+    return 0.5 * (a + b);
+  };
+
+  const validIntervals = [];
+  let inValid = isValidAt(0);
+  let curStart = inValid ? 0 : null;
+
+  for (let i = 1; i <= numSteps; i++) {
+    const s = i === numSteps ? L : i * step;
+    const v = isValidAt(s);
+    if (!inValid && v) {
+      curStart = refineBoundary(s, s - step);
+      inValid = true;
+    } else if (inValid && !v) {
+      const curEnd = refineBoundary(s - step, s);
+      if (curEnd - curStart > 0.5) {
+        validIntervals.push([curStart, curEnd]);
+      }
+      curStart = null;
+      inValid = false;
+    }
+  }
+  if (inValid && curStart !== null && L - curStart > 0.5) {
+    validIntervals.push([curStart, L]);
+  }
+
+  if (validIntervals.length === 0) return [];
+
+  const dashLen = Number(layer.dashLength) || 0;
+  const gapLen = Number(layer.gapLength) || 0;
+  const dashOffset = Number(layer.dashOffset) || 0;
+  const dashClipMode = layer.dashClipMode || 'normal_path';
+
+  const outPaths = [];
+
+  if (dashLen > 0 && gapLen > 0) {
+    const period = dashLen + gapLen;
+    const kMin = Math.floor((-dashOffset - dashLen) / period) - 1;
+    const kMax = Math.ceil((L + Math.abs(dashOffset)) / period) + 1;
+
+    for (let k = kMin; k <= kMax; k++) {
+      const d0 = k * period - dashOffset;
+      const d1 = d0 + dashLen;
+      if (d1 <= 0 || d0 >= L) continue;
+
+      for (let m = 0; m < validIntervals.length; m++) {
+        const [sA, sB] = validIntervals[m];
+        const u0 = Math.max(0, d0, sA);
+        const u1 = Math.min(L, d1, sB);
+        const segLen = u1 - u0;
+        if (segLen <= 0.5) continue;
+
+        // In 'whole_dash' mode, omit any partial dash that was chopped shorter than dashLen
+        if (dashClipMode === 'whole_dash' && dashLen < L && segLen < dashLen - 1.5) {
+          continue;
+        }
+
+        const dStr = curveDef.subPathD(u0, u1);
+        if (dStr) outPaths.push(dStr);
+      }
+    }
+  } else {
+    for (let m = 0; m < validIntervals.length; m++) {
+      const [sA, sB] = validIntervals[m];
+      if (sB - sA > 0.5) {
+        const dStr = curveDef.subPathD(sA, sB);
+        if (dStr) outPaths.push(dStr);
+      }
+    }
+  }
+
+  return outPaths;
+}
+
+/**
+ * Helper to create a 1D curve definition for a straight line segment (x1, y1) -> (x2, y2).
+ */
+export function makeLineCurveDef(x1, y1, x2, y2) {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const totalLen = Math.hypot(dx, dy);
+  const pointAt = (s) => {
+    const t = totalLen > 1e-5 ? Math.max(0, Math.min(1, s / totalLen)) : 0;
+    return [x1 + dx * t, y1 + dy * t];
+  };
+  const subPathD = (s0, s1) => {
+    if (s1 - s0 <= 0.2) return '';
+    const [ax, ay] = pointAt(s0);
+    const [bx, by] = pointAt(s1);
+    return `M ${ax.toFixed(2)},${ay.toFixed(2)} L ${bx.toFixed(2)},${by.toFixed(2)}`;
+  };
+  return { totalLen, pointAt, subPathD };
+}
+
+/**
+ * Helper to create a 1D curve definition for a circular arc.
+ */
+export function makeCircularArcCurveDef(cx, cy, r, startAngleRad, sweepAngleRad, dir) {
+  const totalLen = Math.max(0, r * sweepAngleRad);
+  const pointAt = (s) => {
+    const ang = startAngleRad + dir * (r > 1e-4 ? s / r : 0);
+    return [cx + r * Math.cos(ang), cy + r * Math.sin(ang)];
+  };
+  const subPathD = (s0, s1) => {
+    const ds = s1 - s0;
+    if (ds <= 0.2 || r <= 1e-3) return '';
+    const subSweep = ds / r;
+    if (subSweep >= 2 * Math.PI - 1e-3) {
+      return `M ${(cx - r).toFixed(2)},${cy.toFixed(2)} a ${r.toFixed(2)},${r.toFixed(2)} 0 1,0 ${(r * 2).toFixed(2)},0 a ${r.toFixed(2)},${r.toFixed(2)} 0 1,0 ${(-r * 2).toFixed(2)},0`;
+    }
+    const a0 = startAngleRad + dir * (s0 / r);
+    const a1 = startAngleRad + dir * (s1 / r);
+    const sx = cx + r * Math.cos(a0);
+    const sy = cy + r * Math.sin(a0);
+    const ex = cx + r * Math.cos(a1);
+    const ey = cy + r * Math.sin(a1);
+    const largeArc = subSweep > Math.PI ? 1 : 0;
+    const sweepFlag = dir > 0 ? 1 : 0;
+    return `M ${sx.toFixed(2)},${sy.toFixed(2)} A ${r.toFixed(2)},${r.toFixed(2)} 0 ${largeArc},${sweepFlag} ${ex.toFixed(2)},${ey.toFixed(2)}`;
+  };
+  return { totalLen, pointAt, subPathD };
+}
+
+/**
+ * Helper to create a 1D curve definition for a sampled polyline.
+ */
+export function makePolylineCurveDef(pts) {
+  if (!pts || pts.length < 2) {
+    return { totalLen: 0, pointAt: () => [0, 0], subPathD: () => '' };
+  }
+  const cum = [0];
+  for (let i = 1; i < pts.length; i++) {
+    cum.push(cum[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
+  }
+  const totalLen = cum[cum.length - 1];
+
+  const pointAt = (s) => {
+    if (s <= 0) return pts[0];
+    if (s >= totalLen) return pts[pts.length - 1];
+    let lo = 0;
+    let hi = cum.length - 2;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (cum[mid] <= s) lo = mid;
+      else hi = mid - 1;
+    }
+    const segLen = cum[lo + 1] - cum[lo];
+    const t = segLen > 1e-5 ? (s - cum[lo]) / segLen : 0;
+    return [
+      pts[lo][0] + t * (pts[lo + 1][0] - pts[lo][0]),
+      pts[lo][1] + t * (pts[lo + 1][1] - pts[lo][1])
+    ];
+  };
+
+  const subPathD = (s0, s1) => {
+    if (s1 - s0 <= 0.2) return '';
+    const subPts = trimPolylineByArcLength(pts, s0, totalLen - s1);
+    if (!subPts || subPts.length < 2) return '';
+    return subPts.map(([x, y], i) => `${i === 0 ? 'M' : 'L'} ${x.toFixed(2)},${y.toFixed(2)}`).join(' ');
+  };
+
+  return { totalLen, pointAt, subPathD };
 }
 
 /**
@@ -411,6 +868,15 @@ function distToPolyline(px, py, pts) {
  */
 export function distanceToLayerQ1(layer, px, py) {
   if (!layer || !layer.visible) return Infinity;
+
+  if (layer.type === 'triangle_cone') {
+    const cone = solveTriangleCone(layer);
+    if (!cone.valid) return Infinity;
+    const dLeft = distToSegment(px, py, cone.leftStart[0], cone.leftStart[1], cone.leftEnd[0], cone.leftEnd[1]);
+    const dRight = distToSegment(px, py, cone.rightStart[0], cone.rightStart[1], cone.rightEnd[0], cone.rightEnd[1]);
+    const dBase = distToSegment(px, py, cone.leftEnd[0], cone.leftEnd[1], cone.rightEnd[0], cone.rightEnd[1]);
+    return Math.min(dLeft, dRight, layer.renderStyle === 'stroked_sides' ? Infinity : dBase);
+  }
 
   if (layer.type === 'rect_or_line') {
     if (layer.subMode === 'hline_y0') {
@@ -500,19 +966,18 @@ export function distanceToLayerQ1(layer, px, py) {
 
 /**
  * Resolves the effective grayscale value (0..255) and CSS color for a given layer or background level
- * using the 10-Level Grayscale & Color Palette (Level 0 = Ground Base, Levels 1..9 = 9 Grayscale Tiers).
+ * using the Multi-Level Grayscale & Color Palette (Level 0 = Ground Base, Levels 1..N = Active Line Tiers).
  */
 export function resolveLayerGrayAndCss(layerOrLevel, opacity = 1.0, project = null, isShaderPreview = false) {
   const palette = project?.colorPalettePreview;
   const levels = Array.isArray(palette?.levels) ? palette.levels : null;
-  const maxLvl = levels && levels.length > 1 ? levels.length - 1 : 6;
+  const maxLvl = levels && levels.length > 1 ? levels.length - 1 : 7;
   const usePaletteColors = Boolean(palette?.enabled) && !isShaderPreview;
 
   let levelIdx = null;
   let rawGray = 255;
 
   if (typeof layerOrLevel === 'number') {
-    // Direct level index (e.g. 0 for ground base)
     levelIdx = layerOrLevel;
     const found = levels?.find(l => l.level === levelIdx);
     rawGray = found ? found.gray : (levelIdx === 0 ? (project?.backgroundGray ?? 0) : Math.round((levelIdx / maxLvl) * 255));
@@ -523,7 +988,6 @@ export function resolveLayerGrayAndCss(layerOrLevel, opacity = 1.0, project = nu
       rawGray = found ? Number(found.gray) : Number(layerOrLevel.gray ?? 255);
     } else {
       rawGray = Number(layerOrLevel.gray ?? 255);
-      // Find closest level if palette color preview is enabled
       if (levels && levels.length > 0) {
         let bestL = levels[0];
         let bestD = Math.abs(rawGray - bestL.gray);

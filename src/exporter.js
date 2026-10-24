@@ -241,8 +241,7 @@ export function downloadBlob(blob, filename) {
 export function exportProjectJson(project) {
   const copy = JSON.parse(JSON.stringify(project));
   const blob = new Blob([JSON.stringify(copy, null, 2)], { type: 'application/json' });
-  const safeName = (project.name || 'rl_ground_project').toLowerCase().replace(/[^a-z0-9_-]+/g, '_');
-  downloadBlob(blob, `${safeName}.json`);
+  downloadBlob(blob, 'project.json');
 }
 
 export function exportSvgFile(project, mode = 'q1', includeReference = false, useColorPalettePreview = false) {
