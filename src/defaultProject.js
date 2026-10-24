@@ -4,7 +4,7 @@
  * `project.json` directly without modifying any JavaScript code!
  */
 
-import projectJson from '../project.json' with { type: 'json' };
+import projectJson from '../project.json';
 
 export const DEFAULT_GRAY_PALETTE_LEVELS = (
   Array.isArray(projectJson?.colorPalettePreview?.levels) && projectJson.colorPalettePreview.levels.length >= 2

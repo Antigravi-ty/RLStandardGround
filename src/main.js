@@ -109,21 +109,23 @@ class GroundStudioApp {
   }
 
   async reloadFromRepoJsonFile() {
-    try {
-      const resp = await fetch(`./project.json?t=${Date.now()}`, { cache: 'no-store' });
-      if (resp.ok) {
-        const freshJson = await resp.json();
-        if (freshJson && Array.isArray(freshJson.layers)) {
-          this.project = this.ensurePaletteLevels(freshJson);
-          localStorage.setItem(REPO_JSON_HASH_KEY, computeJsonFingerprint(freshJson));
-          this.selectedLayerId = this.project.layers[0]?.id || null;
-          this.syncTopControlsFromProject();
-          this.syncAll();
-          return;
+    for (const endpoint of [`./__repo_project_json?t=${Date.now()}`, `./project.json?t=${Date.now()}`]) {
+      try {
+        const resp = await fetch(endpoint, { cache: 'no-store' });
+        if (resp.ok && (resp.headers.get('content-type') || '').includes('application/json')) {
+          const freshJson = await resp.json();
+          if (freshJson && Array.isArray(freshJson.layers)) {
+            this.project = this.ensurePaletteLevels(freshJson);
+            localStorage.setItem(REPO_JSON_HASH_KEY, computeJsonFingerprint(freshJson));
+            this.selectedLayerId = this.project.layers[0]?.id || null;
+            this.syncTopControlsFromProject();
+            this.syncAll();
+            return;
+          }
         }
+      } catch (e) {
+        // try next fallback
       }
-    } catch (e) {
-      console.warn('Fetch ./project.json fallback to bundled DEFAULT_PROJECT:', e);
     }
     this.project = this.ensurePaletteLevels(JSON.parse(JSON.stringify(DEFAULT_PROJECT)));
     this.selectedLayerId = this.project.layers[0]?.id || null;

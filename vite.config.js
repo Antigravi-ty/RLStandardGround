@@ -16,7 +16,7 @@ export default defineConfig({
     {
       name: 'serve-and-copy-project-json',
       configureServer(server) {
-        server.middlewares.use('/project.json', (req, res, next) => {
+        server.middlewares.use('/__repo_project_json', (req, res, next) => {
           try {
             const p = path.resolve(process.cwd(), 'project.json');
             if (fs.existsSync(p)) {
